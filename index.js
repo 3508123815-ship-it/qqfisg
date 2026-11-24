@@ -7,7 +7,10 @@ import http from 'node:http';
 const APPID = process.env.QQ_APPID || '';
 const SECRET = process.env.QQ_SECRET || '';
 const DEEPSEEK_KEY = process.env.DEEPSEEK_API_KEY || '';
-const MODEL = process.env.MODEL || 'deepseek-chat';
+// 老名字兜底：deepseek-chat 已经下线，统一走 deepseek-flash（它本身就能看图）
+const RAW_MODEL = process.env.MODEL || 'deepseek-flash';
+const MODEL_MAP = { 'deepseek-chat': 'deepseek-flash', 'deepseek-v4-flash': 'deepseek-flash' };
+const MODEL = MODEL_MAP[RAW_MODEL] || RAW_MODEL;
 const PORT = Number(process.env.PORT || 3000);
 const SELF_URL = process.env.RENDER_EXTERNAL_URL || '';
 
@@ -228,7 +231,7 @@ async function saveState() {
 }
 
 // ---------- 叫模型 ----------
-async function askFish(key, text) {
+async function askFish(key, text, imageUrl = null) {
   const score = moodScore(key);
   const last = lastSpoke.get(key) || 0;
   const gapMin = last ? Math.round((Date.now() - last) / 60000) : -1;
@@ -242,11 +245,21 @@ async function askFish(key, text) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
+  if (imageUrl) {
+    extra += `\n对方发了一张图片，你要真的看了再回，别假装没看见，也别描述成照片报告。`;
+  }
+
+  const userContent = imageUrl
+    ? [
+        { type: 'text', text: text || '看看这张图' },
+        { type: 'image_url', image_url: { url: imageUrl } },
+      ]
+    : text || '在吗';
 
   const messages = [
     { role: 'system', content: PERSONA + extra },
     ...recall(key),
-    { role: 'user', content: text },
+    { role: 'user', content: userContent },
   ];
   const res = await fetch('https://api.deepseek.com/chat/completions', {
     method: 'POST',
@@ -254,12 +267,19 @@ async function askFish(key, text) {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${DEEPSEEK_KEY}`,
     },
-    body: JSON.stringify({ model: MODEL, messages, temperature: 1.2, max_tokens: 500 }),
+    body: JSON.stringify({
+      model: MODEL,
+      messages,
+      temperature: 1.2,
+      max_tokens: 900,
+      thinking: { type: 'disabled' },
+    }),
+    signal: AbortSignal.timeout(60000),
   });
   const data = await res.json();
   const answer = data?.choices?.[0]?.message?.content?.trim();
   if (!answer) throw new Error('模型没回: ' + JSON.stringify(data).slice(0, 300));
-  remember(key, 'user', text);
+  remember(key, 'user', text || '[发了一张图]');
   remember(key, 'assistant', answer);
   return answer;
 }
@@ -447,6 +467,16 @@ async function sendMeme(kind, openid, tag, msgId, seq = 1) {
 }
 const seen = new Set();
 
+// 从消息里挑出图片附件的地址
+function pickImage(d) {
+  const list = d?.attachments;
+  if (!Array.isArray(list)) return null;
+  const img = list.find(
+    (a) => a && typeof a.content_type === 'string' && a.content_type.startsWith('image/')
+  );
+  return img?.url || null;
+}
+
 async function onMessage(kind, d) {
   if (!d || !d.id) return;
   if (seen.has(d.id)) return;
@@ -454,7 +484,8 @@ async function onMessage(kind, d) {
   if (seen.size > 500) seen.clear();
 
   const text = (d.content || '').trim();
-  if (!text) return;
+  const imageUrl = pickImage(d);
+  if (!text && !imageUrl) return;
 
   const openid = kind === 'group' ? d.group_openid : d.author?.user_openid;
   if (!openid) return;
@@ -471,7 +502,7 @@ async function onMessage(kind, d) {
     if (nicknames.delete(key)) console.log('[称呼] 已清掉');
   }
 
-  console.log(`[${kind}] ${text.slice(0, 60)}（心情 ${score.toFixed(2)}）`);
+  console.log(`[${kind}] ${text.slice(0, 60) || "[图片]"}${imageUrl ? " +图" : ""}（心情 ${score.toFixed(2)}）`);
 
   // 同一 msg_id 最多回 4 次（单聊）/ 5 次（群聊），msg_seq 要递增
   const LIMIT = kind === 'group' ? 5 : 4;
@@ -483,7 +514,7 @@ async function onMessage(kind, d) {
   const room = () => seq < LIMIT;
 
   try {
-    let answer = await askFish(key, text);
+    let answer = await askFish(key, text, imageUrl);
     if (answer.length > 1500) answer = answer.slice(0, 1500) + '…';
 
     // 别秒回，装成在打字：字数越多「想」得越久，再抖一点随机

@@ -388,18 +388,26 @@ const VOICE_POOL = [
   { name: 'zh-CN-liaoning-XiaobeiNeural', weight: 20 },
 ];
 
-function pickVoice() {
-  const total = VOICE_POOL.reduce((a, v) => a + v.weight, 0);
+function pickVoice(score = 0) {
+  // 心情好偏活泼，火大了偏东北那股冲劲
+  const pool = VOICE_POOL.map((v) => {
+    let w = v.weight;
+    if (v.name.includes('liaoning')) w = score < -0.5 ? 45 : score > 0.5 ? 10 : 20;
+    if (v.name.includes('Xiaoyi')) w = score > 0.5 ? 70 : score < -0.5 ? 30 : 55;
+    if (v.name.includes('Xiaoxiao')) w = score < -0.5 ? 30 : 25;
+    return { name: v.name, weight: w };
+  });
+  const total = pool.reduce((a, v) => a + v.weight, 0);
   let r = Math.random() * total;
-  for (const v of VOICE_POOL) {
+  for (const v of pool) {
     r -= v.weight;
     if (r <= 0) return v.name;
   }
-  return VOICE_POOL[0].name;
+  return pool[0].name;
 }
 
 // 让模型把它要说的话改成「说出来的样子」，去掉那股书面味
-async function toSpoken(text) {
+async function toSpoken(text, score = 0) {
   try {
     const res = await fetch('https://api.deepseek.com/chat/completions', {
       method: 'POST',
@@ -410,6 +418,11 @@ async function toSpoken(text) {
           {
             role: 'system',
             content:
+              (score < -0.5
+                ? '你心里正不痛快，说话冲、短、带刺，可以不耐烦，别客气。'
+                : score > 0.5
+                  ? '你心情不错，说话带笑，尾音可以拖一点，语气轻快。'
+                  : '你语气随便，像跟熟人唠嗑。') +
               '把下面这段话改写成你亲口说出来的样子。要求：像在 QQ 里讲话那样随意；句子要短，多用逗号断开，一句最多十几个字；自然带上语气词（嗯、诶、啊、嘛、哈、啧、得了、行吧、好家伙），开头偶尔可以垫一个「嗯」；去掉所有书面语、成语堆砌、排比和"首先其次最后"这种结构；不要表情符号、不要括号说明。最多 55 字，只输出改写后的话，不要任何解释。',
           },
           { role: 'user', content: text },
@@ -450,36 +463,46 @@ function splitForSpeech(text) {
   return out.length ? out : [clean];
 }
 
-async function synthSegment(mode, text, out, voice, rate, pitch) {
+// 心情直接改成声音：急、冲、拖、软
+function voiceParams(score = 0) {
+  const rnd = (a, b) => a + Math.random() * (b - a);
+  if (score >= 1.5) return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '+' + Math.round(rnd(8, 16)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.1 };
+  if (score >= 0.5) return { rate: '+' + Math.round(rnd(10, 18)) + '%', pitch: '+' + Math.round(rnd(4, 10)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.12 };
+  if (score > -0.5) return { rate: '+' + Math.round(rnd(2, 12)) + '%', pitch: '+' + Math.round(rnd(0, 8)) + 'Hz', volume: '0%', gap: 0.16 };
+  if (score > -1.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '-' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.1 };
+  // 真生气了：又急又冲，音调压低带刺，停顿短
+  return { rate: '+' + Math.round(rnd(18, 30)) + '%', pitch: '-' + Math.round(rnd(2, 8)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.07 };
+}
+
+async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
   const code =
     mode === 'edge'
-      ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], sys.argv[3], rate=sys.argv[4], pitch=sys.argv[5]).save(sys.argv[2]))'
+      ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], sys.argv[3], rate=sys.argv[4], pitch=sys.argv[5], volume=sys.argv[6]).save(sys.argv[2]))'
       : 'import sys\nfrom gtts import gTTS\ngTTS(sys.argv[1], lang="zh-CN").save(sys.argv[2])';
   const args =
     mode === 'edge'
-      ? ['python3', ['-c', code, text, out, voice, rate, pitch], 90000]
+      ? ['python3', ['-c', code, text, out, voice, rate, pitch, volume || '0%'], 90000]
       : ['python3', ['-c', code, text, out], 90000];
   const r = await runCmd(args[0], args[1], args[2]);
   return r.code === 0;
 }
 
-async function makeVoice(text, dir) {
+async function makeVoice(text, dir, score = 0) {
   const mode = await ensureTts();
   if (!mode) return null;
 
   const segs = splitForSpeech(text).slice(0, 8);
   if (!segs.length) return null;
 
-  const voice = pickVoice();
+  const voice = pickVoice(score);
+  const mood = voiceParams(score);
   const parts = [];
   let okCount = 0;
 
   for (let i = 0; i < segs.length; i++) {
     const out = path.join(dir, `s${i}.mp3`);
     // 每段语速音调都抖一下，听起来才有起伏
-    const rate = '+' + Math.round(4 + Math.random() * 16) + '%';
-    const pitch = '+' + Math.round(Math.random() * 12) + 'Hz';
-    const ok = await synthSegment(mode, segs[i], out, voice, rate, pitch);
+    const ok = await synthSegment(mode, segs[i], out, voice, mood.rate, mood.pitch, mood.volume);
     if (ok) {
       parts.push(out);
       okCount++;
@@ -506,7 +529,7 @@ async function makeVoice(text, dir) {
       silence = path.join(dir, 'gap.mp3');
       const r = await runCmd(
         'ffmpeg',
-        ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', '0.16', '-q:a', '9', silence],
+        ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', String(mood.gap), '-q:a', '9', silence],
         20000
       );
       if (r.code !== 0) silence = '';
@@ -550,18 +573,18 @@ async function makeVoice(text, dir) {
       console.log('[语音] 音频太大，跳过');
       return null;
     }
-    console.log(`[语音] 声音 ${voice}，${parts.length} 段`);
+    console.log(`[语音] 声音 ${voice}，${parts.length} 段，心情 ${score.toFixed(2)}（${mood.rate}/${mood.pitch}）`);
     return buf;
   } catch {
     return null;
   }
 }
 
-async function sendVoice(kind, openid, text, msgId, seq = 1) {
+async function sendVoice(kind, openid, text, msgId, seq = 1, score = 0) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tts-'));
   try {
-    const spoken = (await toSpoken(text)).slice(0, 120) || text.slice(0, 120);
-    const buf = await makeVoice(spoken, dir);
+    const spoken = (await toSpoken(text, score)).slice(0, 120) || text.slice(0, 120);
+    const buf = await makeVoice(spoken, dir, score);
     if (!buf) return false;
 
     const t = await ensureToken();
@@ -922,7 +945,7 @@ async function onMessage(kind, d) {
     // 语音优先：念出来了就不重复打字
     let voiceOk = false;
     if ((wantsVoice || voiceByModel) && answer && room()) {
-      voiceOk = await sendVoice(kind, openid, answer, d.id, nextSeq());
+      voiceOk = await sendVoice(kind, openid, answer, d.id, nextSeq(), moodScore(key));
       if (voiceOk) lastVoice.set(key, Date.now());
     }
 

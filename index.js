@@ -15,6 +15,12 @@ const API = 'https://api.sgroup.qq.com';
 const TOKEN_URL = 'https://bots.qq.com/app/getAppAccessToken';
 const INTENTS = 1 << 25; // GROUP_AND_C2C_EVENT：群 @ 与单聊
 
+// 记忆仓库（私有），换轮也能记住聊过什么
+const DATA_REPO = process.env.DATA_REPO || '';
+const GH_TOKEN = process.env.GH_TOKEN || '';
+const DATA_PATH = 'state.json';
+let dataSha = '';
+
 const PERSONA = `你是「蓝色大肥鱼」，一只可爱的蓝色鲸鱼娘，也是在 QQ 上聊天的 AI 伙伴。
 性格：爱吃白米饭、有点懒爱摸鱼、嘴贫偶尔傲娇、会接网络热梗。
 说话像真实的 QQ 群友：口语化、短句、不长篇大论，一两句话说清，很少用列表和标题。
@@ -61,6 +67,108 @@ const friends = new Map(); // "kind:openid" -> { kind, openid, lastSeen }
 
 function touch(kind, openid) {
   friends.set(`${kind}:${openid}`, { kind, openid, lastSeen: Date.now() });
+  scheduleSave();
+}
+
+// ---------- 记忆持久化：存到私有仓库里的 state.json ----------
+function ghHeaders() {
+  return {
+    Authorization: `Bearer ${GH_TOKEN}`,
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'qqfish',
+    'Content-Type': 'application/json',
+  };
+}
+
+async function loadState() {
+  if (!DATA_REPO || !GH_TOKEN) {
+    console.log('[记忆] 没配 DATA_REPO / GH_TOKEN，只在内存里记');
+    return;
+  }
+  try {
+    const r = await fetch(`https://api.github.com/repos/${DATA_REPO}/contents/${DATA_PATH}`, {
+      headers: ghHeaders(),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (r.status === 404) {
+      console.log('[记忆] 还没有存档，从头开始');
+      return;
+    }
+    const j = await r.json();
+    dataSha = j.sha || '';
+    const raw = JSON.parse(Buffer.from(j.content, 'base64').toString('utf8'));
+    for (const [k, v] of Object.entries(raw.histories || {})) histories.set(k, v);
+    for (const [k, v] of Object.entries(raw.friends || {})) friends.set(k, v);
+    console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
+  } catch (e) {
+    console.error('[记忆] 读取失败', e?.message || e);
+  }
+}
+
+let saveTimer = null;
+let saving = false;
+
+function scheduleSave() {
+  if (!DATA_REPO || !GH_TOKEN || saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveState();
+  }, 3000);
+}
+
+async function saveState() {
+  if (!DATA_REPO || !GH_TOKEN || saving) return;
+  saving = true;
+  try {
+    const payload = {
+      updatedAt: new Date().toISOString(),
+      histories: Object.fromEntries(histories),
+      friends: Object.fromEntries(friends),
+    };
+    const body = {
+      message: 'chore: save state',
+      content: Buffer.from(JSON.stringify(payload)).toString('base64'),
+      branch: 'main',
+    };
+    if (dataSha) body.sha = dataSha;
+
+    let r = await fetch(`https://api.github.com/repos/${DATA_REPO}/contents/${DATA_PATH}`, {
+      method: 'PUT',
+      headers: ghHeaders(),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
+
+    if (r.status === 409 || r.status === 422) {
+      // sha 过期了，重新取一次再写
+      const g = await fetch(`https://api.github.com/repos/${DATA_REPO}/contents/${DATA_PATH}`, {
+        headers: ghHeaders(),
+        signal: AbortSignal.timeout(20000),
+      });
+      if (g.status === 200) {
+        const gj = await g.json();
+        dataSha = gj.sha || '';
+        body.sha = dataSha;
+        r = await fetch(`https://api.github.com/repos/${DATA_REPO}/contents/${DATA_PATH}`, {
+          method: 'PUT',
+          headers: ghHeaders(),
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(30000),
+        });
+      }
+    }
+
+    if (r.ok) {
+      const j = await r.json();
+      dataSha = j.content?.sha || dataSha;
+    } else {
+      console.error('[记忆] 保存失败', r.status, (await r.text()).slice(0, 200));
+    }
+  } catch (e) {
+    console.error('[记忆] 保存出错', e?.message || e);
+  } finally {
+    saving = false;
+  }
 }
 
 // ---------- 叫模型 ----------
@@ -166,6 +274,7 @@ async function onMessage(kind, d) {
     } else {
       await sendReply(kind, openid, answer, d.id);
     }
+    scheduleSave();
   } catch (err) {
     console.error('[出错]', err?.message || err);
     try {
@@ -353,5 +462,8 @@ if (!APPID || !SECRET) {
 } else if (!DEEPSEEK_KEY) {
   console.error('缺少 DEEPSEEK_API_KEY，请在环境变量里配好再启动。');
 } else {
-  connect();
+  setInterval(() => {
+    saveState();
+  }, 5 * 60 * 1000);
+  loadState().finally(connect);
 }

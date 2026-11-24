@@ -379,16 +379,74 @@ async function ensureTts() {
   return '';
 }
 
+// 有几个声音换着用，别每次一个调调
+const VOICE_POOL = [
+  { name: 'zh-CN-XiaoyiNeural', weight: 55 },
+  { name: 'zh-CN-XiaoxiaoNeural', weight: 25 },
+  { name: 'zh-CN-liaoning-XiaobeiNeural', weight: 20 },
+];
+
+function pickVoice() {
+  const total = VOICE_POOL.reduce((a, v) => a + v.weight, 0);
+  let r = Math.random() * total;
+  for (const v of VOICE_POOL) {
+    r -= v.weight;
+    if (r <= 0) return v.name;
+  }
+  return VOICE_POOL[0].name;
+}
+
+// 让模型把它要说的话改成「说出来的样子」，去掉那股书面味
+async function toSpoken(text) {
+  try {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_KEY}` },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '把下面这段话改写成你亲口说出来的样子：口语、短句、带点语气词（诶、啊、嘛、啊喂、得了、哈、啧），别用书面语、别用表情符号、别用括号说明、别念标点符号的名字。最多 60 字，只输出改写后的那段话，不要任何解释。',
+          },
+          { role: 'user', content: text },
+        ],
+        temperature: 1.3,
+        max_tokens: 200,
+        thinking: { type: 'disabled' },
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const j = await res.json();
+    const out = j?.choices?.[0]?.message?.content?.trim();
+    return out || '';
+  } catch (e) {
+    console.log('[语音] 口语化失败:', e?.message || e);
+    return '';
+  }
+}
+
 async function makeVoice(text, dir) {
   const mode = await ensureTts();
   if (!mode) return null;
   const out = path.join(dir, 'v.mp3');
+
+  const voice = pickVoice();
+  const rate = '+' + Math.round(4 + Math.random() * 12) + '%';
+  const pitch = '+' + Math.round(Math.random() * 8) + 'Hz';
+
   const code =
     mode === 'edge'
-      ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], "zh-CN-XiaoyiNeural").save(sys.argv[2]))'
+      ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], sys.argv[3], rate=sys.argv[4], pitch=sys.argv[5]).save(sys.argv[2]))'
       : 'import sys\nfrom gtts import gTTS\ngTTS(sys.argv[1], lang="zh-CN").save(sys.argv[2])';
 
-  const r = await runCmd('python3', ['-c', code, text, out], 150000);
+  const args =
+    mode === 'edge'
+      ? ['python3', ['-c', code, text, out, voice, rate, pitch], 150000]
+      : ['python3', ['-c', code, text, out], 150000];
+
+  const r = await runCmd(args[0], args[1], args[2]);
   if (r.code !== 0) {
     console.log('[语音] 合成失败:', (r.err || '').slice(-200));
     return null;
@@ -403,6 +461,7 @@ async function makeVoice(text, dir) {
       console.log('[语音] 音频太大，跳过');
       return null;
     }
+    console.log(`[语音] 声音 ${voice} 语速 ${rate} 音调 ${pitch}`);
     return buf;
   } catch {
     return null;
@@ -412,7 +471,8 @@ async function makeVoice(text, dir) {
 async function sendVoice(kind, openid, text, msgId, seq = 1) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tts-'));
   try {
-    const buf = await makeVoice(text.slice(0, 120), dir);
+    const spoken = (await toSpoken(text)).slice(0, 120) || text.slice(0, 120);
+    const buf = await makeVoice(spoken, dir);
     if (!buf) return false;
 
     const t = await ensureToken();

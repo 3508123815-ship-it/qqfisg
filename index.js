@@ -1021,7 +1021,11 @@ async function ttsDiagnose() {
   return out.join('\n');
 }
 
-async function onMessage(kind, d) {
+// 缓冲：用户一次没说完，连着发几条，要合并成一句再理解
+const pendingTurns = new Map();
+const MERGE_WINDOW_MS = 3000;
+
+function onMessage(kind, d) {
   if (!d || !d.id) return;
   if (seen.has(d.id)) return;
   seen.add(d.id);
@@ -1034,6 +1038,32 @@ async function onMessage(kind, d) {
   const openid = kind === 'group' ? d.group_openid : d.author?.user_openid;
   if (!openid) return;
 
+  const key = `${kind}:${openid}`;
+  const cur = pendingTurns.get(key) || { kind, openid, parts: [], media: null, lastId: d.id, timer: null };
+  if (text) cur.parts.push(text);
+  if (media) cur.media = media;
+  cur.lastId = d.id;
+  if (cur.timer) clearTimeout(cur.timer);
+  cur.timer = setTimeout(() => {
+    flushTurn(key);
+  }, MERGE_WINDOW_MS);
+  pendingTurns.set(key, cur);
+  console.log(`[收到] ${text.slice(0, 40) || '[媒体]'}（等他说完…）`);
+}
+
+async function flushTurn(key) {
+  const cur = pendingTurns.get(key);
+  if (!cur) return;
+  pendingTurns.delete(key);
+  const joined = cur.parts.join('，').trim();
+  try {
+    await processTurn(cur.kind, cur.openid, joined, cur.media, cur.lastId);
+  } catch (e) {
+    console.log('[处理] 出错:', e?.message || e);
+  }
+}
+
+async function processTurn(kind, openid, text, media, msgId) {
   const key = `${kind}:${openid}`;
   touch(kind, openid);
   const score = updateMood(key, text);
@@ -1060,7 +1090,7 @@ async function onMessage(kind, d) {
   if (/诊断语音|语音诊断/.test(text)) {
     try {
       const report = await ttsDiagnose();
-      if (room()) await sendReply(kind, openid, report, d.id, nextSeq());
+      if (room()) await sendReply(kind, openid, report, msgId, nextSeq());
     } catch (e) {
       console.log('[诊断] 失败:', e?.message || e);
     }
@@ -1081,7 +1111,7 @@ async function onMessage(kind, d) {
         payload = { unsupported: '一段视频（没读出来）' };
       }
     } else if (media?.kind === 'audio') {
-      console.log('[语音] 收到语音附件:', JSON.stringify(d.attachments || []).slice(0, 300));
+      console.log('[语音] 收到语音附件:', media.url ? media.url.slice(0, 120) : '');
       payload = { unsupported: '一条语音' };
     } else if (media?.kind === 'other') {
       payload = { unsupported: '一个文件' };
@@ -1118,7 +1148,7 @@ async function onMessage(kind, d) {
     const nagging = /(再|还)(来|发|说|整)(一?[个段条遍])?/.test(text) && Date.now() - (lastVoice.get(key) || 0) < 10 * 60 * 1000;
     const wantsVoice = askedVoice || nagging;
     if (wantsMeme && room()) {
-      await sendMeme(kind, openid, tags[0] || resolveTag(text), d.id, nextSeq());
+      await sendMeme(kind, openid, tags[0] || resolveTag(text), msgId, nextSeq());
     }
 
     // 语音优先：念出来了就不重复打字
@@ -1126,9 +1156,9 @@ async function onMessage(kind, d) {
     if ((wantsVoice || voiceByModel) && answer && room()) {
       // 第一次要装 ChatTTS，先吱一声，别让人干等
       if (chatterState === '' && room()) {
-        await sendReply(kind, openid, '等会儿，鱼先清个嗓子', d.id, nextSeq());
+        await sendReply(kind, openid, '等会儿，鱼先清个嗓子', msgId, nextSeq());
       }
-      voiceOk = await sendVoice(kind, openid, answer, d.id, nextSeq(), moodScore(key));
+      voiceOk = await sendVoice(kind, openid, answer, msgId, nextSeq(), moodScore(key));
       if (voiceOk) lastVoice.set(key, Date.now());
     }
 
@@ -1139,14 +1169,14 @@ async function onMessage(kind, d) {
         .filter(Boolean);
       for (const p of parts) {
         if (!room()) break;
-        await sendReply(kind, openid, p, d.id, nextSeq());
+        await sendReply(kind, openid, p, msgId, nextSeq());
         await new Promise((r) => setTimeout(r, 600 + Math.random() * 800));
       }
     }
 
     for (const tag of tags.slice(0, 1)) {
       if (!room()) break;
-      await sendMeme(kind, openid, tag, d.id, nextSeq());
+      await sendMeme(kind, openid, tag, msgId, nextSeq());
     }
 
     lastSpoke.set(key, Date.now());
@@ -1155,7 +1185,7 @@ async function onMessage(kind, d) {
   } catch (err) {
     console.error('[出错]', err?.message || err);
     try {
-      if (room()) await sendReply(kind, openid, '鱼这边卡了一下，等下再喊我一遍呗。', d.id, nextSeq());
+      if (room()) await sendReply(kind, openid, '鱼这边卡了一下，等下再喊我一遍呗。', msgId, nextSeq());
     } catch {}
   }
 }

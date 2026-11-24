@@ -413,6 +413,33 @@ async function sendActive(kind, openid, content) {
   return true;
 }
 
+// ---------- ffmpeg：机器上可能没有，没有就临时装一个 ----------
+let ffmpegPath = '';
+
+async function ensureFfmpeg() {
+  if (ffmpegPath) return ffmpegPath;
+  const p1 = await runCmd('ffmpeg', ['-version'], 15000);
+  if (p1.code === 0) {
+    ffmpegPath = 'ffmpeg';
+    return ffmpegPath;
+  }
+  console.log('[ffmpeg] 机器上没装，临时装一个 …');
+  const inst = await runCmd('python3', ['-m', 'pip', 'install', '--quiet', 'imageio-ffmpeg'], 240000);
+  if (inst.code !== 0) {
+    console.log('[ffmpeg] 装不上:', (inst.err || '').slice(-160));
+    return '';
+  }
+  const r = await runCmd('python3', ['-c', 'import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())'], 30000);
+  const exe = (r.out || '').trim();
+  if (exe && exe.includes('ffmpeg')) {
+    ffmpegPath = exe;
+    console.log('[ffmpeg] 用上了:', exe);
+    return ffmpegPath;
+  }
+  console.log('[ffmpeg] 还是没拿到');
+  return '';
+}
+
 // ---------- 语音：本机合成，直接把音频塞上去 ----------
 let ttsMode = '';
 
@@ -612,8 +639,13 @@ async function chatTtsVoice(text, dir) {
     console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-900));
     return null;
   }
+  const ff = await ensureFfmpeg();
+  if (!ff) {
+    console.log('[语音] 没有 ffmpeg，ChatTTS 的 wav 转不了 mp3');
+    return null;
+  }
   const conv = await runCmd(
-    'ffmpeg',
+    ff,
     ['-y', '-i', wav, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', mp3],
     60000
   );
@@ -665,6 +697,16 @@ async function makeVoice(text, dir, score = 0) {
 
   const finalFile = path.join(dir, 'final.mp3');
 
+  const readAll = async () => {
+    const bufs = [];
+    for (const f of parts) {
+      try {
+        bufs.push(await fs.readFile(f));
+      } catch {}
+    }
+    return bufs.length ? Buffer.concat(bufs) : null;
+  };
+
   if (parts.length === 1) {
     try {
       await fs.copyFile(parts[0], finalFile);
@@ -672,43 +714,49 @@ async function makeVoice(text, dir, score = 0) {
       return null;
     }
   } else {
-    // 段与段之间垫 160ms 静音，像换气
-    let silence = '';
-    try {
-      silence = path.join(dir, 'gap.mp3');
-      const r = await runCmd(
-        'ffmpeg',
-        ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', String(mood.gap), '-q:a', '9', silence],
-        20000
-      );
-      if (r.code !== 0) silence = '';
-    } catch {
-      silence = '';
-    }
+    const ff = await ensureFfmpeg();
+    let merged = false;
 
-    const listLines = [];
-    for (let i = 0; i < parts.length; i++) {
-      listLines.push(`file '${parts[i].split('/').pop()}'`);
-      if (silence && i !== parts.length - 1) listLines.push(`file 'gap.mp3'`);
-    }
-    const listFile = path.join(dir, 'list.txt');
-    await fs.writeFile(listFile, listLines.join('\n') + '\n');
-
-    let r = await runCmd(
-      'ffmpeg',
-      ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', finalFile],
-      60000
-    );
-    if (r.code !== 0) {
-      r = await runCmd('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', finalFile], 60000);
-    }
-    if (r.code !== 0) {
-      console.log('[语音] 拼接失败，退回单段:', (r.err || '').slice(-160));
+    if (ff) {
+      let silence = '';
       try {
-        await fs.copyFile(parts[0], finalFile);
+        silence = path.join(dir, 'gap.mp3');
+        const r = await runCmd(
+          ff,
+          ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', String(mood.gap), '-q:a', '9', silence],
+          20000
+        );
+        if (r.code !== 0) silence = '';
       } catch {
-        return null;
+        silence = '';
       }
+
+      const listLines = [];
+      for (let k = 0; k < parts.length; k++) {
+        listLines.push(`file '${parts[k].split('/').pop()}'`);
+        if (silence && k !== parts.length - 1) listLines.push("file 'gap.mp3'");
+      }
+      const listFile = path.join(dir, 'list.txt');
+      await fs.writeFile(listFile, listLines.join('\n') + '\n');
+
+      let r = await runCmd(
+        ff,
+        ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', finalFile],
+        60000
+      );
+      if (r.code !== 0) {
+        r = await runCmd(ff, ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', finalFile], 60000);
+      }
+      if (r.code === 0) merged = true;
+      else console.log('[语音] ffmpeg 拼接没成，直接串字节:', (r.err || '').slice(-160));
+    }
+
+    if (!merged) {
+      // 没有 ffmpeg 也能成：mp3 是一帧一帧的，直接接起来照样能放，不丢后半句
+      const direct = await readAll();
+      if (!direct) return null;
+      await fs.writeFile(finalFile, direct);
+      console.log(`[语音] 直接拼接 ${parts.length} 段（没走 ffmpeg）`);
     }
   }
 

@@ -516,24 +516,25 @@ function splitForSpeech(text) {
   let cur = '';
   for (const piece of raw) {
     cur += piece;
-    if (cur.length >= 9) {
+    if (cur.length >= 7) {
       out.push(cur);
       cur = '';
     }
   }
   if (cur) out.push(cur);
-  return out.length ? out : [clean];
+  const fixed = out.map((seg) => (/[，。！？~…、,.!?]$/.test(seg) ? seg : seg + '。'));
+  return fixed.length ? fixed : [clean];
 }
 
 // 心情直接改成声音：急、冲、拖、软
 function voiceParams(score = 0) {
   const rnd = (a, b) => a + Math.random() * (b - a);
-  if (score >= 1.5) return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '+' + Math.round(rnd(8, 16)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.1 };
-  if (score >= 0.5) return { rate: '+' + Math.round(rnd(10, 18)) + '%', pitch: '+' + Math.round(rnd(4, 10)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.12 };
-  if (score > -0.5) return { rate: '+' + Math.round(rnd(2, 12)) + '%', pitch: '+' + Math.round(rnd(0, 8)) + 'Hz', volume: '0%', gap: 0.16 };
-  if (score > -1.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '-' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.1 };
+  if (score >= 1.5) return { rate: '+' + Math.round(rnd(12, 22)) + '%', pitch: '+' + Math.round(rnd(8, 16)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.18 };
+  if (score >= 0.5) return { rate: '+' + Math.round(rnd(8, 16)) + '%', pitch: '+' + Math.round(rnd(4, 10)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.2 };
+  if (score > -0.5) return { rate: '+' + Math.round(rnd(2, 10)) + '%', pitch: '+' + Math.round(rnd(0, 8)) + 'Hz', volume: '0%', gap: 0.26 };
+  if (score > -1.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '-' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.2 };
   // 真生气了：又急又冲，音调压低带刺，停顿短
-  return { rate: '+' + Math.round(rnd(18, 30)) + '%', pitch: '-' + Math.round(rnd(2, 8)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.07 };
+  return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '-' + Math.round(rnd(2, 8)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.12 };
 }
 
 async function synthSegment(mode, text, out, voice, rate, pitch, volume) {

@@ -349,6 +349,120 @@ async function sendActive(kind, openid, content) {
   return true;
 }
 
+// ---------- 语音：本机合成，直接把音频塞上去 ----------
+let ttsMode = '';
+
+async function pipInstall(pkg) {
+  const r = await runCmd('python3', ['-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', pkg], 240000);
+  if (r.code !== 0) console.log('[语音] pip 装 ' + pkg + ' 失败:', (r.err || '').slice(-160));
+  return r.code === 0;
+}
+
+// 先试 edge-tts（自然），不行退 gTTS
+async function ensureTts() {
+  if (ttsMode) return ttsMode;
+  let probe = await runCmd('python3', ['-c', 'import edge_tts'], 25000);
+  if (probe.code !== 0 && (await pipInstall('edge-tts'))) probe = { code: 0 };
+  if (probe.code === 0) {
+    ttsMode = 'edge';
+    console.log('[语音] 用 edge-tts');
+    return ttsMode;
+  }
+  probe = await runCmd('python3', ['-c', 'import gtts'], 25000);
+  if (probe.code !== 0 && (await pipInstall('gTTS'))) probe = { code: 0 };
+  if (probe.code === 0) {
+    ttsMode = 'gtts';
+    console.log('[语音] 用 gTTS');
+    return ttsMode;
+  }
+  console.log('[语音] 没有可用的合成引擎');
+  return '';
+}
+
+async function makeVoice(text, dir) {
+  const mode = await ensureTts();
+  if (!mode) return null;
+  const out = path.join(dir, 'v.mp3');
+  const code =
+    mode === 'edge'
+      ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], "zh-CN-XiaoyiNeural").save(sys.argv[2]))'
+      : 'import sys\nfrom gtts import gTTS\ngTTS(sys.argv[1], lang="zh-CN").save(sys.argv[2])';
+
+  const r = await runCmd('python3', ['-c', code, text, out], 150000);
+  if (r.code !== 0) {
+    console.log('[语音] 合成失败:', (r.err || '').slice(-200));
+    return null;
+  }
+  try {
+    const buf = await fs.readFile(out);
+    if (buf.length < 500) {
+      console.log('[语音] 音频是空的');
+      return null;
+    }
+    if (buf.length > 4.5 * 1024 * 1024) {
+      console.log('[语音] 音频太大，跳过');
+      return null;
+    }
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+async function sendVoice(kind, openid, text, msgId, seq = 1) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'tts-'));
+  try {
+    const buf = await makeVoice(text.slice(0, 120), dir);
+    if (!buf) return false;
+
+    const t = await ensureToken();
+    const uploadUrl =
+      kind === 'group' ? `${API}/v2/groups/${openid}/files` : `${API}/v2/users/${openid}/files`;
+
+    const up = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `QQBot ${t}` },
+      body: JSON.stringify({
+        file_type: 3,
+        file_name: 'voice.mp3',
+        file_data: buf.toString('base64'),
+        srv_send_msg: false,
+      }),
+      signal: AbortSignal.timeout(60000),
+    });
+    const uj = await up.json().catch(() => null);
+    if (!up.ok || !uj?.file_info) {
+      console.log('[语音] 上传失败', up.status, JSON.stringify(uj).slice(0, 200));
+      return false;
+    }
+
+    const msgUrl =
+      kind === 'group' ? `${API}/v2/groups/${openid}/messages` : `${API}/v2/users/${openid}/messages`;
+    const body = { msg_type: 7, media: { file_info: uj.file_info } };
+    if (msgId) {
+      body.msg_id = msgId;
+      body.msg_seq = seq;
+    }
+    const r = await fetch(msgUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `QQBot ${t}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!r.ok) {
+      console.log('[语音] 发送失败', r.status, (await r.text()).slice(0, 200));
+      return false;
+    }
+    console.log('[语音] 发出去了', text.slice(0, 20));
+    return true;
+  } catch (e) {
+    console.log('[语音] 出错:', e?.message || e);
+    return false;
+  } finally {
+    fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 // ---------- 表情包 ----------
 const REPO_SLUG = '3508123815-ship-it/qqfisg';
 
@@ -616,6 +730,7 @@ async function onMessage(kind, d) {
         payload = { unsupported: '一段视频（没读出来）' };
       }
     } else if (media?.kind === 'audio') {
+      console.log('[语音] 收到语音附件:', JSON.stringify(d.attachments || []).slice(0, 300));
       payload = { unsupported: '一条语音' };
     } else if (media?.kind === 'other') {
       payload = { unsupported: '一个文件' };
@@ -639,6 +754,7 @@ async function onMessage(kind, d) {
 
     // 明着要图的，先甩一张，别废话
     const wantsMeme = /(表情包|表情|来张图|发张图|发个图|整张图)/.test(text) && text.length <= 20;
+    const wantsVoice = /(发语音|语音回复|说句话|说给我听|念一下|读一下|用语音)/.test(text);
     if (wantsMeme && room()) {
       await sendMeme(kind, openid, tags[0] || resolveTag(text), d.id, nextSeq());
     }
@@ -658,6 +774,11 @@ async function onMessage(kind, d) {
     for (const tag of tags.slice(0, 1)) {
       if (!room()) break;
       await sendMeme(kind, openid, tag, d.id, nextSeq());
+    }
+
+    // 想要语音的，合成一段发过去
+    if (wantsVoice && answer && room()) {
+      await sendVoice(kind, openid, answer, d.id, nextSeq());
     }
 
     lastSpoke.set(key, Date.now());

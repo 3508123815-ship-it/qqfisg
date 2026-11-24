@@ -1141,6 +1141,22 @@ async function flushTurn(key) {
 
 async function processTurn(kind, openid, text, media, msgId) {
   const key = `${kind}:${openid}`;
+
+  if (isAsleep()) {
+    const rec = missed.get(key) || { kind, openid, count: 0 };
+    rec.count += 1;
+    rec.kind = kind;
+    rec.openid = openid;
+    missed.set(key, rec);
+
+    if (rec.count < 3) {
+      console.log(`[睡觉] 不回（今晚第 ${rec.count} 条）`);
+      return;
+    }
+    // 被吵醒了，有起床气
+    moods.set(key, { score: -1.5, updatedAt: Date.now() });
+    console.log('[睡觉] 被吵醒了');
+  }
   touch(kind, openid);
   const score = updateMood(key, text);
 
@@ -1296,6 +1312,22 @@ const firedSlots = new Set();
 const lastActive = new Map();
 // 谁刚听过语音，用来理解「再来一个」
 const lastVoice = new Map();
+
+// 作息：23:30 睡，7:30 起
+const SLEEP_START = 23 * 60 + 30;
+const SLEEP_END = 7 * 60 + 30;
+// 睡着时收到的消息，醒来补一句
+const missed = new Map();
+
+function cnMinutes() {
+  const d = cnNow();
+  return d.getUTCHours() * 60 + d.getUTCMinutes();
+}
+
+function isAsleep() {
+  const m = cnMinutes();
+  return m >= SLEEP_START || m < SLEEP_END;
+}
 let nextChatAt = Date.now() + (40 + Math.random() * 50) * 60_000;
 
 function cnNow() {
@@ -1373,7 +1405,22 @@ async function tickChatter() {
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
   tickChatter().catch((e) => console.error('[闲聊] 出错', e?.message || e));
+  tickWakeUp().catch((e) => console.error('[睡觉] 出错', e?.message || e));
 }, 60_000);
+
+// 睡醒了，把昨晚漏掉的补一句
+async function tickWakeUp() {
+  if (isAsleep() || !missed.size) return;
+  for (const [key, rec] of [...missed.entries()]) {
+    missed.delete(key);
+    const line =
+      rec.count >= 3
+        ? `醒了醒了，昨晚你发了 ${rec.count} 条，鱼睡得跟死了一样`
+        : '早，昨晚你发的看见了，鱼睡着了没回你';
+    const ok = await sendActive(rec.kind, rec.openid, line);
+    if (ok) console.log('[睡觉] 醒来补了一句');
+  }
+}
 
 // 没人惹它也会有小情绪，像个活人
 setInterval(() => {

@@ -3,6 +3,10 @@
 // 无第三方依赖（用 Node 内置 fetch / WebSocket，需要 Node >= 22）
 
 import http from 'node:http';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
 
 const APPID = process.env.QQ_APPID || '';
 const SECRET = process.env.QQ_SECRET || '';
@@ -231,7 +235,7 @@ async function saveState() {
 }
 
 // ---------- 叫模型 ----------
-async function askFish(key, text, imageUrl = null) {
+async function askFish(key, text, media = null) {
   const score = moodScore(key);
   const last = lastSpoke.get(key) || 0;
   const gapMin = last ? Math.round((Date.now() - last) / 60000) : -1;
@@ -245,16 +249,28 @@ async function askFish(key, text, imageUrl = null) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
-  if (imageUrl) {
-    extra += `\n对方发了一张图片，你要真的看了再回，别假装没看见，也别描述成照片报告。`;
-  }
 
-  const userContent = imageUrl
-    ? [
-        { type: 'text', text: text || '看看这张图' },
-        { type: 'image_url', image_url: { url: imageUrl } },
-      ]
-    : text || '在吗';
+  let userContent = text || '在吗';
+  let mediaTag = '';
+
+  if (media?.frames?.length) {
+    extra += `\n对方发了一段视频，下面是从视频里按时间顺序截的 ${media.frames.length} 帧。你要真的看了再说，别假装没看见，也别写成冷冰冰的镜头报告。`;
+    userContent = [
+      { type: 'text', text: text || '看看这段视频，说说你都看到啥了' },
+      ...media.frames.map((u) => ({ type: 'image_url', image_url: { url: u } })),
+    ];
+    mediaTag = '[发了一段视频]';
+  } else if (media?.imageUrl) {
+    extra += `\n对方发了一张图片，你要真的看了再回，别假装没看见，也别描述成照片报告。`;
+    userContent = [
+      { type: 'text', text: text || '看看这张图' },
+      { type: 'image_url', image_url: { url: media.imageUrl } },
+    ];
+    mediaTag = '[发了一张图]';
+  } else if (media?.unsupported) {
+    extra += `\n对方发了${media.unsupported}，你看不了，直说看不了，别瞎编。`;
+    mediaTag = `[发了${media.unsupported}]`;
+  }
 
   const messages = [
     { role: 'system', content: PERSONA + extra },
@@ -274,12 +290,12 @@ async function askFish(key, text, imageUrl = null) {
       max_tokens: 900,
       thinking: { type: 'disabled' },
     }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(90000),
   });
   const data = await res.json();
   const answer = data?.choices?.[0]?.message?.content?.trim();
   if (!answer) throw new Error('模型没回: ' + JSON.stringify(data).slice(0, 300));
-  remember(key, 'user', text || '[发了一张图]');
+  remember(key, 'user', text ? `${text}${mediaTag}` : mediaTag || text);
   remember(key, 'assistant', answer);
   return answer;
 }
@@ -467,14 +483,87 @@ async function sendMeme(kind, openid, tag, msgId, seq = 1) {
 }
 const seen = new Set();
 
-// 从消息里挑出图片附件的地址
-function pickImage(d) {
+// 从消息里挑出图片/视频附件
+function pickMedia(d) {
   const list = d?.attachments;
   if (!Array.isArray(list)) return null;
-  const img = list.find(
-    (a) => a && typeof a.content_type === 'string' && a.content_type.startsWith('image/')
-  );
-  return img?.url || null;
+  const a = list.find((x) => x && typeof x.content_type === 'string' && x.url);
+  if (!a) return null;
+  if (a.content_type.startsWith('image/')) return { kind: 'image', url: a.url };
+  if (a.content_type.startsWith('video/')) return { kind: 'video', url: a.url };
+  if (a.content_type.startsWith('audio/')) return { kind: 'audio', url: a.url };
+  return { kind: 'other', url: a.url };
+}
+
+// 跑个外部命令（ffmpeg / ffprobe）
+function runCmd(cmd, args, timeoutMs = 120000) {
+  return new Promise((resolve) => {
+    let out = '';
+    let err = '';
+    let p;
+    try {
+      p = spawn(cmd, args);
+    } catch (e) {
+      resolve({ code: -1, out, err: String(e) });
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        p.kill('SIGKILL');
+      } catch {}
+    }, timeoutMs);
+    p.stdout?.on('data', (d) => (out += d));
+    p.stderr?.on('data', (d) => (err += d));
+    p.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, out, err });
+    });
+    p.on('error', (e) => {
+      clearTimeout(timer);
+      resolve({ code: -1, out, err: String(e) });
+    });
+  });
+}
+
+// 视频拆成几帧图片，好让模型「看」
+async function videoFrames(url, want = 8) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'vid-'));
+  const inFile = path.join(dir, 'in.mp4');
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(120000) });
+    if (!res.ok) throw new Error('下载视频失败 ' + res.status);
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > 80 * 1024 * 1024) throw new Error('视频太大');
+    await fs.writeFile(inFile, buf);
+
+    const probe = await runCmd(
+      'ffprobe',
+      ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1', inFile],
+      30000
+    );
+    const dur = parseFloat((probe.out || '').trim()) || 0;
+    const fps = dur > 0 ? `${want}/${dur}` : '1/3';
+
+    const r = await runCmd(
+      'ffmpeg',
+      ['-y', '-i', inFile, '-vf', `fps=${fps},scale=512:-2`, '-frames:v', String(want), path.join(dir, 'f%02d.jpg')],
+      180000
+    );
+
+    const files = (await fs.readdir(dir)).filter((f) => /^f\d+\.jpg$/.test(f)).sort();
+    const frames = [];
+    for (const f of files.slice(0, want)) {
+      const b = await fs.readFile(path.join(dir, f));
+      frames.push(`data:image/jpeg;base64,${b.toString('base64')}`);
+    }
+    console.log(
+      `[视频] ${(buf.length / 1024 / 1024).toFixed(1)}MB / ${dur.toFixed(1)}s，抽出 ${frames.length} 帧（ffmpeg ${r.code}）`
+    );
+    if (!frames.length) console.log('[视频] ffmpeg 没出帧:', (r.err || '').slice(0, 200));
+    return frames;
+  } finally {
+    fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 async function onMessage(kind, d) {
@@ -484,8 +573,8 @@ async function onMessage(kind, d) {
   if (seen.size > 500) seen.clear();
 
   const text = (d.content || '').trim();
-  const imageUrl = pickImage(d);
-  if (!text && !imageUrl) return;
+  const media = pickMedia(d);
+  if (!text && !media) return;
 
   const openid = kind === 'group' ? d.group_openid : d.author?.user_openid;
   if (!openid) return;
@@ -502,7 +591,7 @@ async function onMessage(kind, d) {
     if (nicknames.delete(key)) console.log('[称呼] 已清掉');
   }
 
-  console.log(`[${kind}] ${text.slice(0, 60) || "[图片]"}${imageUrl ? " +图" : ""}（心情 ${score.toFixed(2)}）`);
+  console.log(`[${kind}] ${text.slice(0, 60) || "[无文字]"}${media ? " +" + media.kind : ""}（心情 ${score.toFixed(2)}）`);
 
   // 同一 msg_id 最多回 4 次（单聊）/ 5 次（群聊），msg_seq 要递增
   const LIMIT = kind === 'group' ? 5 : 4;
@@ -514,7 +603,25 @@ async function onMessage(kind, d) {
   const room = () => seq < LIMIT;
 
   try {
-    let answer = await askFish(key, text, imageUrl);
+    // 图片直接给模型；视频先抽几帧再给
+    let payload = null;
+    if (media?.kind === 'image') {
+      payload = { imageUrl: media.url };
+    } else if (media?.kind === 'video') {
+      try {
+        const frames = await videoFrames(media.url);
+        payload = frames.length ? { frames } : { unsupported: '一段视频（没抽到帧）' };
+      } catch (e) {
+        console.log('[视频] 抽帧失败:', e?.message || e);
+        payload = { unsupported: '一段视频（没读出来）' };
+      }
+    } else if (media?.kind === 'audio') {
+      payload = { unsupported: '一条语音' };
+    } else if (media?.kind === 'other') {
+      payload = { unsupported: '一个文件' };
+    }
+
+    let answer = await askFish(key, text, payload);
     if (answer.length > 1500) answer = answer.slice(0, 1500) + '…';
 
     // 别秒回，装成在打字：字数越多「想」得越久，再抖一点随机

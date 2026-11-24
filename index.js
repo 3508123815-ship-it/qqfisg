@@ -1014,7 +1014,7 @@ async function onMessage(kind, d) {
     const wantsMeme = /(表情包|表情|来张图|发张图|发个图|整张图)/.test(text) && text.length <= 20;
 
     // 要语音：明说要、上一轮刚给过语音还想要、或者模型自己加了标记
-    const askedVoice = /(语音|声音|说句话|说给我听|说一句|念一下|读一下|用嘴|听你|出声|唱)/.test(text);
+    const askedVoice = /(语音|声音|说句话|说给我听|说一句|说两句|念一下|念给|读一下|朗读|用嘴|听你|出声|唱|叫一?声|叫声|喊一?声|吭一声|吱一声|开口|说话|来一句|来一段|讲讲|说说)/.test(text);
     const nagging = /(再|还)(来|发|说|整)(一?[个段条遍])?/.test(text) && Date.now() - (lastVoice.get(key) || 0) < 10 * 60 * 1000;
     const wantsVoice = askedVoice || nagging;
     if (wantsMeme && room()) {

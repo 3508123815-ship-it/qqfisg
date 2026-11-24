@@ -1,0 +1,14 @@
+{
+  "name": "qqfish",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "QQ 官方机器人桥：WebSocket 网关 → DeepSeek → 被动回复",
+  "main": "index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}

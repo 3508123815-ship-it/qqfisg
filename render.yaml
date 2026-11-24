@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: qqfish
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: QQ_APPID
+        sync: false
+      - key: QQ_SECRET
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: MODEL
+        value: deepseek-chat

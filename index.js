@@ -487,7 +487,86 @@ async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
   return r.code === 0;
 }
 
+// ---------- ChatTTS：更真的对话腔，装不上就退回 edge ----------
+let chatterState = ''; // '' 未试 · 'ok' 能用 · 'broken' 放弃
+
+async function ensureChatTts() {
+  if (chatterState === 'ok') return true;
+  if (chatterState === 'broken') return false;
+
+  let probe = await runCmd('python3', ['-c', 'import ChatTTS'], 30000);
+  if (probe.code !== 0) {
+    console.log('[语音] 第一次用 ChatTTS，装依赖（可能要几分钟）...');
+    const inst = await runCmd('python3', ['-m', 'pip', 'install', '--quiet', 'chattts'], 600000);
+    if (inst.code !== 0) {
+      chatterState = 'broken';
+      console.log('[语音] ChatTTS 装不上，退回 edge:', (inst.err || '').slice(-200));
+      return false;
+    }
+    probe = await runCmd('python3', ['-c', 'import ChatTTS'], 60000);
+  }
+
+  if (probe.code !== 0) {
+    chatterState = 'broken';
+    console.log('[语音] ChatTTS 导入失败，退回 edge:', (probe.err || '').slice(-200));
+    return false;
+  }
+  chatterState = 'ok';
+  console.log('[语音] ChatTTS 就绪');
+  return true;
+}
+
+async function chatTtsVoice(text, dir) {
+  const wav = path.join(dir, 'chat.wav');
+  const mp3 = path.join(dir, 'chat.mp3');
+  const script = [
+    'import sys, os',
+    'import ChatTTS',
+    'import torch, torchaudio',
+    'chat = ChatTTS.Chat()',
+    "chat.load(compile=False)",
+    "spk_file = '/tmp/qqfish_spk.txt'",
+    'if os.path.exists(spk_file):',
+    "    spk = open(spk_file).read().strip()",
+    'else:',
+    '    spk = chat.sample_random_speaker()',
+    "    open(spk_file, 'w').write(spk)",
+    'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=0.3, top_P=0.7, top_K=20)',
+    'wavs = chat.infer([sys.argv[1]], params_infer_code=params, use_decoder=True)',
+    'torchaudio.save(sys.argv[2], torch.from_numpy(wavs[0]).unsqueeze(0), 24000)',
+  ].join('\n');
+
+  const t0 = Date.now();
+  const r = await runCmd('python3', ['-c', script, text, wav], 300000);
+  if (r.code !== 0) {
+    console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-250));
+    return null;
+  }
+  const conv = await runCmd(
+    'ffmpeg',
+    ['-y', '-i', wav, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', mp3],
+    60000
+  );
+  if (conv.code !== 0) {
+    console.log('[语音] wav 转 mp3 失败:', (conv.err || '').slice(-160));
+    return null;
+  }
+  try {
+    const buf = await fs.readFile(mp3);
+    console.log(`[语音] ChatTTS 出片，${((Date.now() - t0) / 1000).toFixed(1)}s / ${(buf.length / 1024).toFixed(0)}KB`);
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
 async function makeVoice(text, dir, score = 0) {
+  // 先试 ChatTTS，整段一次合成，它自带呼吸停顿
+  if (await ensureChatTts()) {
+    const buf = await chatTtsVoice(text, dir);
+    if (buf && buf.length > 500 && buf.length < 4.5 * 1024 * 1024) return buf;
+  }
+
   const mode = await ensureTts();
   if (!mode) return null;
 
@@ -945,6 +1024,10 @@ async function onMessage(kind, d) {
     // 语音优先：念出来了就不重复打字
     let voiceOk = false;
     if ((wantsVoice || voiceByModel) && answer && room()) {
+      // 第一次要装 ChatTTS，先吱一声，别让人干等
+      if (chatterState === '' && room()) {
+        await sendReply(kind, openid, '等会儿，鱼先清个嗓子', d.id, nextSeq());
+      }
       voiceOk = await sendVoice(kind, openid, answer, d.id, nextSeq(), moodScore(key));
       if (voiceOk) lastVoice.set(key, Date.now());
     }

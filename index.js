@@ -41,7 +41,9 @@ happy 开心、angry 生气、sad 难过、shy 害羞、like 撒娇比心、conf
 surprised 惊讶、sigh 无语、sleep 困了、daily 干饭、cpu 加班、work 躺平、
 meow 猫、morning 早安、see 震惊、baka 疯了、fool 拒绝、color 花痴、givemoney 要钱。
 标记会被系统换成一张真图片发出去，所以别在正文里解释这个标记，也别连着加好几个。
-大概十条里有两三条带就够自然了，别每句都加。`;
+大概十条里有两三条带就够自然了，别每句都加。
+
+有些时候用声音比打字更贴：哄人、撒娇、损人一句、或者对方摆明了想听你说。这种时候在回复最末尾加一个 [语音] 标记，系统会把你的话念出来发过去当语音（那时正文就不发了）。一条回复里 [语音] 最多一个。`;
 
 // ---------- access token ----------
 let token = '';
@@ -812,14 +814,32 @@ async function onMessage(kind, d) {
       })
       .trim();
 
+    // 模型自己想要用声音说
+    let voiceByModel = false;
+    if (/\[语音\]/.test(answer)) {
+      voiceByModel = true;
+      answer = answer.replace(/\[语音\]/g, '').trim();
+    }
+
     // 明着要图的，先甩一张，别废话
     const wantsMeme = /(表情包|表情|来张图|发张图|发个图|整张图)/.test(text) && text.length <= 20;
-    const wantsVoice = /(发语音|语音回复|说句话|说给我听|念一下|读一下|用语音)/.test(text);
+
+    // 要语音：明说要、上一轮刚给过语音还想要、或者模型自己加了标记
+    const askedVoice = /(语音|声音|说句话|说给我听|说一句|念一下|读一下|用嘴|听你|出声|唱)/.test(text);
+    const nagging = /(再|还)(来|发|说|整)(一?[个段条遍])?/.test(text) && Date.now() - (lastVoice.get(key) || 0) < 10 * 60 * 1000;
+    const wantsVoice = askedVoice || nagging;
     if (wantsMeme && room()) {
       await sendMeme(kind, openid, tags[0] || resolveTag(text), d.id, nextSeq());
     }
 
-    if (answer && room()) {
+    // 语音优先：念出来了就不重复打字
+    let voiceOk = false;
+    if ((wantsVoice || voiceByModel) && answer && room()) {
+      voiceOk = await sendVoice(kind, openid, answer, d.id, nextSeq());
+      if (voiceOk) lastVoice.set(key, Date.now());
+    }
+
+    if (!voiceOk && answer && room()) {
       const parts = answer
         .split(/\n+/)
         .map((s) => s.trim())
@@ -834,11 +854,6 @@ async function onMessage(kind, d) {
     for (const tag of tags.slice(0, 1)) {
       if (!room()) break;
       await sendMeme(kind, openid, tag, d.id, nextSeq());
-    }
-
-    // 想要语音的，合成一段发过去
-    if (wantsVoice && answer && room()) {
-      await sendVoice(kind, openid, answer, d.id, nextSeq());
     }
 
     lastSpoke.set(key, Date.now());
@@ -879,6 +894,8 @@ const CHAT_LINES = [
 const firedSlots = new Set();
 // 每个人上次被主动打扰的时间，避免同一个人短时间被连发
 const lastActive = new Map();
+// 谁刚听过语音，用来理解「再来一个」
+const lastVoice = new Map();
 let nextChatAt = Date.now() + (40 + Math.random() * 50) * 60_000;
 
 function cnNow() {

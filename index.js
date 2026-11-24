@@ -62,6 +62,17 @@ const MAX_TURNS = 16;
 const moods = new Map();
 // 每段对话最后一次说话的时间，用来判断「隔了一阵子」
 const lastSpoke = new Map();
+// 对方要求怎么称呼他
+const nicknames = new Map();
+
+function detectNickname(text) {
+  const m = text.match(/(?:以后|从现在起|往后|就)?(?:都)?(?:叫我|喊我|称呼我)\s*([\u4e00-\u9fa5A-Za-z0-9]{1,8})/);
+  return m ? m[1].trim() : null;
+}
+
+function wantsNicknameCleared(text) {
+  return /(?:别|不要|不用)(?:再)?(?:叫我|喊我|称呼我)/.test(text);
+}
 
 const NEG_WORDS = [/滚/, /闭嘴/, /笨蛋/, /傻/, /烦人/, /讨厌/, /废物/, /垃圾/, /别说了/, /滚开/, /烦死/];
 const POS_WORDS = [/可爱/, /喜欢你/, /厉害/, /好棒/, /乖乖/, /爱你/, /辛苦了/, /谢谢你/, /真好/, /乖/];
@@ -140,6 +151,7 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.friends || {})) friends.set(k, v);
     for (const [k, v] of Object.entries(raw.moods || {})) moods.set(k, v);
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
+    for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
   } catch (e) {
     console.error('[记忆] 读取失败', e?.message || e);
@@ -167,6 +179,7 @@ async function saveState() {
       friends: Object.fromEntries(friends),
       moods: Object.fromEntries(moods),
       lastSpoke: Object.fromEntries(lastSpoke),
+      nicknames: Object.fromEntries(nicknames),
     };
     const body = {
       message: 'chore: save state',
@@ -221,6 +234,10 @@ async function askFish(key, text) {
   const gapMin = last ? Math.round((Date.now() - last) / 60000) : -1;
 
   let extra = `\n\n你此刻的心情：${moodLabel(score)}。按这个心情说话，别硬装开心，也别莫名发火。`;
+  const nick = nicknames.get(key);
+  if (nick) {
+    extra += `\n对方让你称呼他「${nick}」，回话里自然地这么叫，别每句都叫，别解释这个设定。`;
+  }
   if (gapMin >= 30) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
@@ -445,6 +462,15 @@ async function onMessage(kind, d) {
   const key = `${kind}:${openid}`;
   touch(kind, openid);
   const score = updateMood(key, text);
+
+  const askedNick = detectNickname(text);
+  if (askedNick) {
+    nicknames.set(key, askedNick);
+    console.log(`[称呼] 记成「${askedNick}」`);
+  } else if (wantsNicknameCleared(text)) {
+    if (nicknames.delete(key)) console.log('[称呼] 已清掉');
+  }
+
   console.log(`[${kind}] ${text.slice(0, 60)}（心情 ${score.toFixed(2)}）`);
 
   // 同一 msg_id 最多回 4 次（单聊）/ 5 次（群聊），msg_seq 要递增

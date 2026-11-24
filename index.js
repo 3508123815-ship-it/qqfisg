@@ -546,6 +546,7 @@ async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
       ? ['python3', ['-c', code, text, out, voice, rate, pitch, volume || '0%'], 90000]
       : ['python3', ['-c', code, text, out], 90000];
   const r = await runCmd(args[0], args[1], args[2]);
+  if (r.code !== 0) console.log('[语音] edge 分段失败:', (r.err || '').slice(-400));
   return r.code === 0;
 }
 
@@ -601,7 +602,7 @@ async function chatTtsVoice(text, dir) {
   const t0 = Date.now();
   const r = await runCmd('python3', ['-c', script, text, wav], 300000);
   if (r.code !== 0) {
-    console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-250));
+    console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-900));
     return null;
   }
   const conv = await runCmd(
@@ -993,6 +994,32 @@ async function videoFrames(url, want = 8) {
   }
 }
 
+// 一条命令查清语音到底卡在哪，完整报错打到日志里
+async function ttsDiagnose() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'diag-'));
+  const out = [];
+  try {
+    const mode = await ensureTts();
+    out.push('edge 引擎：' + (mode || '装不上'));
+    if (mode) {
+      const ok = await synthSegment(mode, '测试一下', path.join(dir, 'e.mp3'), 'zh-CN-XiaoyiNeural', '+10%', '+2Hz', '0%');
+      out.push('edge 合成：' + (ok ? '成功' : '失败（日志里看）'));
+    }
+    const hasChat = await ensureChatTts();
+    out.push('ChatTTS：' + (hasChat ? '就绪' : '装不上'));
+    if (hasChat) {
+      const buf = await chatTtsVoice('测一下', dir);
+      out.push('ChatTTS 合成：' + (buf ? '成功 ' + Math.round(buf.length / 1024) + 'KB' : '失败（日志里看）'));
+    }
+  } catch (e) {
+    out.push('诊断出错：' + (e?.message || e));
+  } finally {
+    fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+  console.log('[诊断]\n' + out.join('\n'));
+  return out.join('\n');
+}
+
 async function onMessage(kind, d) {
   if (!d || !d.id) return;
   if (seen.has(d.id)) return;
@@ -1028,6 +1055,16 @@ async function onMessage(kind, d) {
     return seq;
   };
   const room = () => seq < LIMIT;
+
+  if (/诊断语音|语音诊断/.test(text)) {
+    try {
+      const report = await ttsDiagnose();
+      if (room()) await sendReply(kind, openid, report, d.id, nextSeq());
+    } catch (e) {
+      console.log('[诊断] 失败:', e?.message || e);
+    }
+    return;
+  }
 
   try {
     // 图片直接给模型；视频先抽几帧再给

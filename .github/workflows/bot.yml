@@ -1,0 +1,23 @@
+name: qqfish
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+concurrency:
+  group: qqfish
+  cancel-in-progress: true
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - env:
+          QQ_APPID: ${{ secrets.QQ_APPID }}
+          QQ_SECRET: ${{ secrets.QQ_SECRET }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          MODEL: deepseek-chat
+        run: timeout --signal=TERM 21000 node index.js || true

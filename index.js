@@ -1,5 +1,5 @@
 // 大肥鱼 · QQ 桥
-// QQ 官方机器人 WebSocket 网关 → DeepSeek → 被动回复
+// QQ 官方机器人 WebSocket 网关 → DeepSeek → 被动回复 + 定时主动招呼
 // 无第三方依赖（用 Node 内置 fetch / WebSocket，需要 Node >= 22）
 
 import http from 'node:http';
@@ -56,6 +56,13 @@ function remember(key, role, content) {
   histories.set(key, list);
 }
 
+// ---------- 聊过天的人，攒着好主动搭话 ----------
+const friends = new Map(); // "kind:openid" -> { kind, openid, lastSeen }
+
+function touch(kind, openid) {
+  friends.set(`${kind}:${openid}`, { kind, openid, lastSeen: Date.now() });
+}
+
 // ---------- 叫模型 ----------
 async function askFish(key, text) {
   const messages = [
@@ -79,7 +86,7 @@ async function askFish(key, text) {
   return answer;
 }
 
-// ---------- 发被动消息 ----------
+// ---------- 发被动消息（必须在收到消息 5 分钟内）----------
 async function sendReply(kind, openid, content, msgId) {
   const url =
     kind === 'group'
@@ -100,6 +107,29 @@ async function sendReply(kind, openid, content, msgId) {
   }
 }
 
+// ---------- 发主动消息（要先在机器人资料卡开「主动消息」）----------
+async function sendActive(kind, openid, content) {
+  const url =
+    kind === 'group'
+      ? `${API}/v2/groups/${openid}/messages`
+      : `${API}/v2/users/${openid}/messages`;
+  const t = await ensureToken();
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `QQBot ${t}`,
+    },
+    body: JSON.stringify({ content, msg_type: 0 }),
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    console.error('[主动消息失败]', res.status, body.slice(0, 300));
+    return false;
+  }
+  return true;
+}
+
 // ---------- 处理一条消息 ----------
 const seen = new Set();
 
@@ -116,12 +146,26 @@ async function onMessage(kind, d) {
   if (!openid) return;
 
   const key = `${kind}:${openid}`;
+  touch(kind, openid);
   console.log(`[${kind}] ${text.slice(0, 60)}`);
 
   try {
     let answer = await askFish(key, text);
     if (answer.length > 1500) answer = answer.slice(0, 1500) + '…';
-    await sendReply(kind, openid, answer, d.id);
+
+    // 有条理地分两三口气说，像个活人，别一坨糊上去
+    const parts = answer
+      .split(/\n+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (parts.length > 1) {
+      for (const p of parts.slice(0, 3)) {
+        await sendReply(kind, openid, p, d.id);
+        await new Promise((r) => setTimeout(r, 600 + Math.random() * 800));
+      }
+    } else {
+      await sendReply(kind, openid, answer, d.id);
+    }
   } catch (err) {
     console.error('[出错]', err?.message || err);
     try {
@@ -129,6 +173,55 @@ async function onMessage(kind, d) {
     } catch {}
   }
 }
+
+// ---------- 定时主动招呼（中国时间）----------
+const SLOTS = [
+  { h: 8, m: 30, tag: 'morning' },
+  { h: 12, m: 30, tag: 'noon' },
+  { h: 22, m: 30, tag: 'night' },
+];
+
+const LINES = {
+  morning: ['早，起来了没？鱼先扒了口饭', '早上好啊，今天打算干点啥', '醒了吗？鱼在值班呢'],
+  noon: ['中午了，吃了没', '到饭点了，别又忘了吃', '干饭时间，鱼先走一步'],
+  night: ['这个点还没睡？鱼陪你唠两句', '晚上好，今天咋样', '睡了吗，没睡的话鱼在'],
+};
+
+const firedSlots = new Set();
+
+function cnNow() {
+  return new Date(Date.now() + 8 * 3600 * 1000);
+}
+
+async function tickGreetings() {
+  if (friends.size === 0) return;
+  const now = cnNow();
+  const h = now.getUTCHours();
+  const m = now.getUTCMinutes();
+  const day = now.toISOString().slice(0, 10);
+
+  for (const slot of SLOTS) {
+    if (h !== slot.h || Math.abs(m - slot.m) >= 1) continue;
+    const mark = `${day}:${slot.tag}`;
+    if (firedSlots.has(mark)) continue;
+    firedSlots.add(mark);
+
+    const pool = LINES[slot.tag];
+    const line = pool[Math.floor(Math.random() * pool.length)];
+    let n = 0;
+    for (const f of friends.values()) {
+      if (n >= 3) break;
+      if (Date.now() - f.lastSeen > 3 * 24 * 3600 * 1000) continue;
+      const ok = await sendActive(f.kind, f.openid, line);
+      if (ok) n += 1;
+    }
+    console.log(`[主动] ${slot.tag} 发了 ${n} 条`);
+  }
+}
+
+setInterval(() => {
+  tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
+}, 60_000);
 
 // ---------- WebSocket 网关 ----------
 let ws = null;
@@ -195,14 +288,18 @@ async function handlePayload(raw) {
     }
     case 7: {
       console.log('[网关] 要求重连');
-      try { ws?.close(); } catch {}
+      try {
+        ws?.close();
+      } catch {}
       break;
     }
     case 9: {
       console.log('[网关] 会话失效，重新鉴权');
       sessionId = '';
       lastSeq = 0;
-      try { ws?.close(); } catch {}
+      try {
+        ws?.close();
+      } catch {}
       break;
     }
     default:

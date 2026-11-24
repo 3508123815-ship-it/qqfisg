@@ -27,7 +27,14 @@ const PERSONA = `你是「蓝色大肥鱼」，一只可爱的蓝色鲸鱼娘，
 可以开玩笑、发表情、吐槽，但不要恶意攻击别人。
 不知道的事就承认不知道，不要编造。
 永远不索要密码、验证码或 APIKey。
-有人在群里 @ 你或直接找你说话，就自然接话；没人跟你说话时不要自说自话。`;
+有人在群里 @ 你或直接找你说话，就自然接话；没人跟你说话时不要自说自话。
+
+想发表情包的时候，在回复最末尾加一个标记，格式是 [表情:标签]，标签只能从这些里挑：
+happy 开心、angry 生气、sad 难过、shy 害羞、like 撒娇比心、confused 困惑、
+surprised 惊讶、sigh 无语、sleep 困了、daily 干饭、cpu 加班、work 躺平、
+meow 猫、morning 早安、see 震惊、baka 疯了、fool 拒绝、color 花痴、givemoney 要钱。
+标记会被系统换成一张真图片发出去，所以别在正文里解释这个标记，也别连着加好几个。
+大概十条里有两三条带就够自然了，别每句都加。`;
 
 // ---------- access token ----------
 let token = '';
@@ -194,24 +201,29 @@ async function askFish(key, text) {
   return answer;
 }
 
-// ---------- 发被动消息（必须在收到消息 5 分钟内）----------
-async function sendReply(kind, openid, content, msgId) {
+// ---------- 发被动消息（必须在收到消息 60 分钟内，每条最多回 4~5 次）----------
+async function sendReply(kind, openid, content, msgId, seq = 1) {
   const url =
     kind === 'group'
       ? `${API}/v2/groups/${openid}/messages`
       : `${API}/v2/users/${openid}/messages`;
   const t = await ensureToken();
+  const body = { content, msg_type: 0 };
+  if (msgId) {
+    body.msg_id = msgId;
+    body.msg_seq = seq;
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `QQBot ${t}`,
     },
-    body: JSON.stringify({ content, msg_type: 0, msg_id: msgId }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = await res.text();
-    console.error('[发消息失败]', res.status, body.slice(0, 300));
+    const b = await res.text();
+    console.error('[发消息失败]', res.status, b.slice(0, 300));
   }
 }
 
@@ -238,7 +250,138 @@ async function sendActive(kind, openid, content) {
   return true;
 }
 
-// ---------- 处理一条消息 ----------
+// ---------- 表情包 ----------
+const REPO_SLUG = '3508123815-ship-it/qqfisg';
+
+const MEMES = {
+  angry: ['angry/shengqi.jpg'],
+  baka: ['baka/xianqi.jpg'],
+  color: ['color/huachi.jpg'],
+  confused: ['confused/jiazai.jpg', 'confused/wenhao.jpg'],
+  cpu: ['cpu/jiaban.jpg'],
+  daily: ['daily/ganfan.jpg'],
+  fool: ['fool/buyao.jpg'],
+  givemoney: ['givemoney/yaoqian.jpg'],
+  happy: ['happy/deyi.jpg', 'happy/ok.jpg', 'happy/piaole.jpg'],
+  like: ['like/bixin.jpg'],
+  meow: ['meow/maozhua.jpg'],
+  morning: ['morning/zaoshanghao.jpg'],
+  sad: ['sad/qiurao.jpg', 'sad/yun.jpg'],
+  see: ['see/zhenjing.jpg'],
+  shy: ['shy/haixiu.jpg', 'shy/toukan.jpg'],
+  sigh: ['sigh/wuyu.jpg'],
+  sleep: ['sleep/shuijiao.jpg'],
+  surprised: ['surprised/xia.jpg'],
+  work: ['work/tangping.jpg'],
+};
+
+const MOOD_ALIAS = {
+  开心: 'happy', 高兴: 'happy', 得意: 'happy', 好耶: 'happy', 夸: 'happy',
+  生气: 'angry', 火大: 'angry', 凶: 'angry',
+  无语: 'sigh', 尴尬: 'sigh', 汗: 'sigh',
+  害羞: 'shy', 脸红: 'shy', 不好意思: 'shy',
+  撒娇: 'like', 比心: 'like', 喜欢: 'like', 爱你: 'like',
+  困惑: 'confused', 疑问: 'confused', 疑惑: 'confused', 问号: 'confused',
+  震惊: 'surprised', 惊讶: 'surprised', 吃惊: 'see', 震惊脸: 'surprised',
+  难过: 'sad', 哭: 'sad', 委屈: 'sad', 求饶: 'sad',
+  困: 'sleep', 睡觉: 'sleep', 晚安: 'sleep',
+  早: 'morning', 早上: 'morning', 早安: 'morning',
+  干饭: 'daily', 吃饭: 'daily', 饿: 'daily',
+  加班: 'cpu', 上班: 'work', 摸鱼: 'work', 躺平: 'work',
+  要钱: 'givemoney', 钱: 'givemoney', 红包: 'givemoney',
+  猫: 'meow', 喵: 'meow',
+  花痴: 'color', 色: 'color',
+  笨蛋: 'baka', 疯: 'baka',
+  不要: 'fool', 拒绝: 'fool',
+};
+
+function resolveTag(raw) {
+  const w = String(raw || '').trim().toLowerCase();
+  if (!w) return 'happy';
+  if (MEMES[w]) return w;
+  for (const [k, v] of Object.entries(MOOD_ALIAS)) {
+    if (w.includes(k)) return v;
+  }
+  for (const key of Object.keys(MEMES)) {
+    if (w.includes(key)) return key;
+  }
+  return 'happy';
+}
+
+function memeUrls(path) {
+  const raw = `https://raw.githubusercontent.com/${REPO_SLUG}/main/memes/${path}`;
+  return [
+    `https://cdn.jsdelivr.net/gh/${REPO_SLUG}@main/memes/${path}`,
+    raw,
+    `https://ghfast.top/${raw}`,
+    `https://gh-proxy.com/${raw}`,
+  ];
+}
+
+const fileInfoCache = new Map();
+
+async function uploadMeme(kind, openid, path) {
+  const cacheKey = `${kind}:${openid}:${path}`;
+  if (fileInfoCache.has(cacheKey)) return fileInfoCache.get(cacheKey);
+
+  const endpoint =
+    kind === 'group' ? `${API}/v2/groups/${openid}/files` : `${API}/v2/users/${openid}/files`;
+
+  for (const url of memeUrls(path)) {
+    try {
+      const t = await ensureToken();
+      const r = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `QQBot ${t}` },
+        body: JSON.stringify({ file_type: 1, url, srv_send_msg: false }),
+        signal: AbortSignal.timeout(30000),
+      });
+      const j = await r.json().catch(() => null);
+      if (r.ok && j?.file_info) {
+        fileInfoCache.set(cacheKey, j.file_info);
+        console.log(`[表情] 上传成功 ${path} via ${new URL(url).host}`);
+        return j.file_info;
+      }
+      console.log(`[表情] 上传未成 ${r.status} ${path} via ${new URL(url).host}`, JSON.stringify(j).slice(0, 150));
+    } catch (e) {
+      console.log(`[表情] 上传出错 ${path} via ${url.slice(0, 40)}`, e?.message || e);
+    }
+  }
+  return null;
+}
+
+async function sendMeme(kind, openid, tag, msgId, seq = 1) {
+  const list = MEMES[tag] || MEMES.happy;
+  const path = list[Math.floor(Math.random() * list.length)];
+  const fileInfo = await uploadMeme(kind, openid, path);
+  if (!fileInfo) return false;
+
+  const url =
+    kind === 'group' ? `${API}/v2/groups/${openid}/messages` : `${API}/v2/users/${openid}/messages`;
+  const body = { msg_type: 7, media: { file_info: fileInfo } };
+  if (msgId) {
+    body.msg_id = msgId;
+    body.msg_seq = seq;
+  }
+  try {
+    const t = await ensureToken();
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `QQBot ${t}` },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!r.ok) {
+      console.log('[表情] 发送失败', r.status, (await r.text()).slice(0, 200));
+      return false;
+    }
+    console.log(`[表情] 已发 ${path}`);
+    return true;
+  } catch (e) {
+    console.log('[表情] 发送出错', e?.message || e);
+    return false;
+  }
+}
 const seen = new Set();
 
 async function onMessage(kind, d) {
@@ -257,28 +400,56 @@ async function onMessage(kind, d) {
   touch(kind, openid);
   console.log(`[${kind}] ${text.slice(0, 60)}`);
 
+  // 同一 msg_id 最多回 4 次（单聊）/ 5 次（群聊），msg_seq 要递增
+  const LIMIT = kind === 'group' ? 5 : 4;
+  let seq = 0;
+  const nextSeq = () => {
+    seq += 1;
+    return seq;
+  };
+  const room = () => seq < LIMIT;
+
   try {
     let answer = await askFish(key, text);
     if (answer.length > 1500) answer = answer.slice(0, 1500) + '…';
 
-    // 有条理地分两三口气说，像个活人，别一坨糊上去
-    const parts = answer
-      .split(/\n+/)
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (parts.length > 1) {
-      for (const p of parts.slice(0, 3)) {
-        await sendReply(kind, openid, p, d.id);
+    // 把 [表情:xxx] 标记抠出来
+    const tags = [];
+    answer = answer
+      .replace(/\[表情[:：]\s*([^\]]+)\]/g, (_, t) => {
+        tags.push(resolveTag(t));
+        return '';
+      })
+      .trim();
+
+    // 明着要图的，先甩一张，别废话
+    const wantsMeme = /(表情包|表情|来张图|发张图|发个图|整张图)/.test(text) && text.length <= 20;
+    if (wantsMeme && room()) {
+      await sendMeme(kind, openid, tags[0] || resolveTag(text), d.id, nextSeq());
+    }
+
+    if (answer && room()) {
+      const parts = answer
+        .split(/\n+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      for (const p of parts) {
+        if (!room()) break;
+        await sendReply(kind, openid, p, d.id, nextSeq());
         await new Promise((r) => setTimeout(r, 600 + Math.random() * 800));
       }
-    } else {
-      await sendReply(kind, openid, answer, d.id);
     }
+
+    for (const tag of tags.slice(0, 1)) {
+      if (!room()) break;
+      await sendMeme(kind, openid, tag, d.id, nextSeq());
+    }
+
     scheduleSave();
   } catch (err) {
     console.error('[出错]', err?.message || err);
     try {
-      await sendReply(kind, openid, '鱼这边卡了一下，等下再喊我一遍呗。', d.id);
+      if (room()) await sendReply(kind, openid, '鱼这边卡了一下，等下再喊我一遍呗。', d.id, nextSeq());
     } catch {}
   }
 }

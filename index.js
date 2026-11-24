@@ -542,9 +542,11 @@ async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
     mode === 'edge'
       ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], sys.argv[3], rate=sys.argv[4], pitch=sys.argv[5], volume=sys.argv[6]).save(sys.argv[2]))'
       : 'import sys\nfrom gtts import gTTS\ngTTS(sys.argv[1], lang="zh-CN").save(sys.argv[2])';
+  const volRaw = String(volume || '0%');
+  const vol = /^[+-]/.test(volRaw) ? volRaw : '+' + volRaw;
   const args =
     mode === 'edge'
-      ? ['python3', ['-c', code, text, out, voice, rate, pitch, volume || '0%'], 90000]
+      ? ['python3', ['-c', code, text, out, voice, rate, pitch, vol], 90000]
       : ['python3', ['-c', code, text, out], 90000];
   const r = await runCmd(args[0], args[1], args[2]);
   if (r.code !== 0) console.log('[语音] edge 分段失败:', (r.err || '').slice(-400));
@@ -585,10 +587,10 @@ async function chatTtsVoice(text, dir) {
   const mp3 = path.join(dir, 'chat.mp3');
   const script = [
     'import sys, os',
+    'import numpy as np, wave',
     'import ChatTTS',
-    'import torch, torchaudio',
     'chat = ChatTTS.Chat()',
-    "chat.load(compile=False)",
+    'chat.load(compile=False)',
     "spk_file = '/tmp/qqfish_spk.txt'",
     'if os.path.exists(spk_file):',
     "    spk = open(spk_file).read().strip()",
@@ -597,7 +599,11 @@ async function chatTtsVoice(text, dir) {
     "    open(spk_file, 'w').write(spk)",
     'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=0.3, top_P=0.7, top_K=20)',
     'wavs = chat.infer([sys.argv[1]], params_infer_code=params, use_decoder=True)',
-    'torchaudio.save(sys.argv[2], torch.from_numpy(wavs[0]).unsqueeze(0), 24000)',
+    'arr = np.asarray(wavs[0], dtype=np.float32).squeeze()',
+    'pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)',
+    "w = wave.open(sys.argv[2], 'wb')",
+    'w.setnchannels(1); w.setsampwidth(2); w.setframerate(24000)',
+    'w.writeframes(pcm.tobytes()); w.close()',
   ].join('\n');
 
   const t0 = Date.now();

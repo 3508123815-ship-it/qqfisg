@@ -609,7 +609,24 @@ async function ensureChatTts() {
   return true;
 }
 
-async function chatTtsVoice(text, dir) {
+// 心情 → ChatTTS 的表现力 + 后期变速变调
+function emotionFor(score = 0) {
+  if (score >= 1.5) return { temp: 0.65, topP: 0.8, speed: 1.1, pitch: 1.04 };
+  if (score >= 0.5) return { temp: 0.55, topP: 0.75, speed: 1.06, pitch: 1.02 };
+  if (score > -0.5) return { temp: 0.35, topP: 0.7, speed: 1.0, pitch: 1.0 };
+  if (score > -1.5) return { temp: 0.45, topP: 0.65, speed: 1.04, pitch: 0.98 };
+  return { temp: 0.6, topP: 0.6, speed: 1.12, pitch: 0.96 };
+}
+
+// 生气时把逗号变成短停顿，重话更冲
+function textForChatTts(text, score) {
+  let t = text.replace(/[\r\n]+/g, '，');
+  if (score >= 0.5) t = t.replace(/，/g, '，[uv_break]');
+  if (score < -0.5) t = t.replace(/，/g, '，[uv_break]');
+  return t.slice(0, 120);
+}
+
+async function chatTtsVoice(text, dir, score = 0) {
   const wav = path.join(dir, 'chat.wav');
   const mp3 = path.join(dir, 'chat.mp3');
   const script = [
@@ -624,7 +641,7 @@ async function chatTtsVoice(text, dir) {
     'else:',
     '    spk = chat.sample_random_speaker()',
     "    open(spk_file, 'w').write(spk)",
-    'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=0.3, top_P=0.7, top_K=20)',
+    'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=float(sys.argv[3]), top_P=float(sys.argv[4]), top_K=20)',
     'wavs = chat.infer([sys.argv[1]], params_infer_code=params, use_decoder=True)',
     'arr = np.asarray(wavs[0], dtype=np.float32).squeeze()',
     'pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)',
@@ -633,8 +650,9 @@ async function chatTtsVoice(text, dir) {
     'w.writeframes(pcm.tobytes()); w.close()',
   ].join('\n');
 
+  const emo = emotionFor(score);
   const t0 = Date.now();
-  const r = await runCmd('python3', ['-c', script, text, wav], 300000);
+  const r = await runCmd('python3', ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP)], 300000);
   if (r.code !== 0) {
     console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-900));
     return null;
@@ -644,9 +662,13 @@ async function chatTtsVoice(text, dir) {
     console.log('[语音] 没有 ffmpeg，ChatTTS 的 wav 转不了 mp3');
     return null;
   }
+  // 变调 + 变速：asetrate 抬高音调会连带加速，再用 atempo 拉回来
+  const pf = emo.pitch;
+  const tempo = Math.max(0.5, Math.min(2.0, emo.speed / pf));
+  const filters = `asetrate=24000*${pf.toFixed(3)},aresample=24000,atempo=${tempo.toFixed(3)}`;
   const conv = await runCmd(
     ff,
-    ['-y', '-i', wav, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', mp3],
+    ['-y', '-i', wav, '-af', filters, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', mp3],
     60000
   );
   if (conv.code !== 0) {
@@ -665,7 +687,7 @@ async function chatTtsVoice(text, dir) {
 async function makeVoice(text, dir, score = 0) {
   // 先试 ChatTTS，整段一次合成，它自带呼吸停顿
   if (await ensureChatTts()) {
-    const buf = await chatTtsVoice(text, dir);
+    const buf = await chatTtsVoice(text, dir, score);
     if (buf && buf.length > 500 && buf.length < 4.5 * 1024 * 1024) return buf;
   }
 

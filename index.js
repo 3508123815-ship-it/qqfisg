@@ -56,7 +56,39 @@ async function ensureToken() {
 
 // ---------- 对话记忆（只在内存里，重启即清空）----------
 const histories = new Map();
-const MAX_TURNS = 12;
+const MAX_TURNS = 16;
+
+// 心情：-2 很气 · -1 不太高兴 · 0 平常 · 1 挺好 · 2 特别开心
+const moods = new Map();
+// 每段对话最后一次说话的时间，用来判断「隔了一阵子」
+const lastSpoke = new Map();
+
+const NEG_WORDS = [/滚/, /闭嘴/, /笨蛋/, /傻/, /烦人/, /讨厌/, /废物/, /垃圾/, /别说了/, /滚开/, /烦死/];
+const POS_WORDS = [/可爱/, /喜欢你/, /厉害/, /好棒/, /乖乖/, /爱你/, /辛苦了/, /谢谢你/, /真好/, /乖/];
+
+function moodScore(key) {
+  return moods.get(key)?.score ?? 0;
+}
+
+function moodLabel(score) {
+  if (score >= 1.5) return '特别开心，尾巴都在摇';
+  if (score >= 0.5) return '心情不错，说话带笑';
+  if (score > -0.5) return '平常状态，嘴上不饶人但没恶意';
+  if (score > -1.5) return '有点不高兴，回话会带点刺';
+  return '真的生气了，语气冲，短句，爱答不理';
+}
+
+function updateMood(key, text) {
+  let s = moodScore(key);
+  const neg = NEG_WORDS.some((r) => r.test(text));
+  const pos = POS_WORDS.some((r) => r.test(text));
+  if (neg) s -= 1;
+  if (pos) s += 1;
+  if (!neg && !pos) s = s > 0 ? Math.max(0, s - 0.25) : s < 0 ? Math.min(0, s + 0.25) : 0;
+  s = Math.max(-2, Math.min(2, s));
+  moods.set(key, { score: s, updatedAt: Date.now() });
+  return s;
+}
 
 function recall(key) {
   return histories.get(key) || [];
@@ -106,6 +138,8 @@ async function loadState() {
     const raw = JSON.parse(Buffer.from(j.content, 'base64').toString('utf8'));
     for (const [k, v] of Object.entries(raw.histories || {})) histories.set(k, v);
     for (const [k, v] of Object.entries(raw.friends || {})) friends.set(k, v);
+    for (const [k, v] of Object.entries(raw.moods || {})) moods.set(k, v);
+    for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
   } catch (e) {
     console.error('[记忆] 读取失败', e?.message || e);
@@ -131,6 +165,8 @@ async function saveState() {
       updatedAt: new Date().toISOString(),
       histories: Object.fromEntries(histories),
       friends: Object.fromEntries(friends),
+      moods: Object.fromEntries(moods),
+      lastSpoke: Object.fromEntries(lastSpoke),
     };
     const body = {
       message: 'chore: save state',
@@ -180,8 +216,18 @@ async function saveState() {
 
 // ---------- 叫模型 ----------
 async function askFish(key, text) {
+  const score = moodScore(key);
+  const last = lastSpoke.get(key) || 0;
+  const gapMin = last ? Math.round((Date.now() - last) / 60000) : -1;
+
+  let extra = `\n\n你此刻的心情：${moodLabel(score)}。按这个心情说话，别硬装开心，也别莫名发火。`;
+  if (gapMin >= 30) {
+    const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
+    extra += `\n对方有 ${gapText}没找你了。`;
+  }
+
   const messages = [
-    { role: 'system', content: PERSONA },
+    { role: 'system', content: PERSONA + extra },
     ...recall(key),
     { role: 'user', content: text },
   ];
@@ -398,7 +444,8 @@ async function onMessage(kind, d) {
 
   const key = `${kind}:${openid}`;
   touch(kind, openid);
-  console.log(`[${kind}] ${text.slice(0, 60)}`);
+  const score = updateMood(key, text);
+  console.log(`[${kind}] ${text.slice(0, 60)}（心情 ${score.toFixed(2)}）`);
 
   // 同一 msg_id 最多回 4 次（单聊）/ 5 次（群聊），msg_seq 要递增
   const LIMIT = kind === 'group' ? 5 : 4;
@@ -412,6 +459,10 @@ async function onMessage(kind, d) {
   try {
     let answer = await askFish(key, text);
     if (answer.length > 1500) answer = answer.slice(0, 1500) + '…';
+
+    // 别秒回，装成在打字：字数越多「想」得越久，再抖一点随机
+    const think = 1200 + Math.min(2500, text.length * 50) + Math.random() * 1200;
+    await new Promise((r) => setTimeout(r, think));
 
     // 把 [表情:xxx] 标记抠出来
     const tags = [];
@@ -445,6 +496,7 @@ async function onMessage(kind, d) {
       await sendMeme(kind, openid, tag, d.id, nextSeq());
     }
 
+    lastSpoke.set(key, Date.now());
     scheduleSave();
   } catch (err) {
     console.error('[出错]', err?.message || err);
@@ -502,6 +554,16 @@ async function tickGreetings() {
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
 }, 60_000);
+
+// 冷落久了，情绪慢慢回平
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of moods) {
+    if (now - v.updatedAt < 30 * 60 * 1000) continue;
+    const s = v.score > 0 ? Math.max(0, v.score - 0.5) : Math.min(0, v.score + 0.5);
+    if (s !== v.score) moods.set(k, { score: s, updatedAt: v.updatedAt });
+  }
+}, 10 * 60 * 1000);
 
 // ---------- WebSocket 网关 ----------
 let ws = null;

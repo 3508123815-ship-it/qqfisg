@@ -683,7 +683,22 @@ const LINES = {
   night: ['这个点还没睡？鱼陪你唠两句', '晚上好，今天咋样', '睡了吗，没睡的话鱼在'],
 };
 
+// 白天随机来一句，别老等着人家先开口
+const CHAT_LINES = [
+  '干嘛呢',
+  '在忙吗，鱼这边闲得长毛了',
+  '刚摸鱼摸到一半，想起你了',
+  '今天吃饭了没',
+  '呃，有没有那种聊两句就困的时候',
+  '鱼刚看到个事想不通，跟你说说',
+  '你这会儿在干嘛，不许说在忙',
+  '摸鱼时间到了，你呢',
+];
+
 const firedSlots = new Set();
+// 每个人上次被主动打扰的时间，避免同一个人短时间被连发
+const lastActive = new Map();
+let nextChatAt = Date.now() + (40 + Math.random() * 50) * 60_000;
 
 function cnNow() {
   return new Date(Date.now() + 8 * 3600 * 1000);
@@ -709,14 +724,57 @@ async function tickGreetings() {
       if (n >= 3) break;
       if (Date.now() - f.lastSeen > 3 * 24 * 3600 * 1000) continue;
       const ok = await sendActive(f.kind, f.openid, line);
-      if (ok) n += 1;
+      if (ok) {
+        n += 1;
+        lastActive.set(`${f.kind}:${f.openid}`, Date.now());
+      }
     }
     console.log(`[主动] ${slot.tag} 发了 ${n} 条`);
   }
 }
 
+async function tickChatter() {
+  if (friends.size === 0) return;
+  const now = cnNow();
+  const h = now.getUTCHours();
+  if (h < 9 || h >= 23) return;      // 白天到睡前才闲聊
+  if (Date.now() < nextChatAt) return;
+
+  const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
+  const cool = Date.now() - 2 * 3600 * 1000;
+  const pool = [...friends.values()].filter(
+    (f) => f.lastSeen > cutoff && (lastActive.get(`${f.kind}:${f.openid}`) || 0) < cool
+  );
+  if (!pool.length) {
+    nextChatAt = Date.now() + 60 * 60 * 1000;
+    return;
+  }
+
+  // 每次最多找两个人，别一起轰炸
+  const picks = [];
+  while (picks.length < Math.min(2, pool.length)) {
+    const f = pool[Math.floor(Math.random() * pool.length)];
+    if (!picks.includes(f)) picks.push(f);
+  }
+
+  const line = CHAT_LINES[Math.floor(Math.random() * CHAT_LINES.length)];
+  let n = 0;
+  for (const f of picks) {
+    const ok = await sendActive(f.kind, f.openid, line);
+    if (ok) {
+      n += 1;
+      lastActive.set(`${f.kind}:${f.openid}`, Date.now());
+    }
+  }
+  console.log(`[闲聊] 发了 ${n} 条：${line}`);
+
+  // 下次隔 2~3 小时
+  nextChatAt = Date.now() + (120 + Math.random() * 60) * 60_000;
+}
+
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
+  tickChatter().catch((e) => console.error('[闲聊] 出错', e?.message || e));
 }, 60_000);
 
 // 冷落久了，情绪慢慢回平

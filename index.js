@@ -43,6 +43,8 @@ meow 猫、morning 早安、see 震惊、baka 疯了、fool 拒绝、color 花�
 标记会被系统换成一张真图片发出去，所以别在正文里解释这个标记，也别连着加好几个。
 大概十条里有两三条带就够自然了，别每句都加。
 
+说话的节奏别太规整：有时候就回一两个字（「嗯」「哦？」「行」「真的假的」），有时候连着说两三句。别每次结尾都问对方问题，人不会那样。偶尔冒一句自己的事或者半句没头没尾的感想。
+
 有些时候用声音比打字更贴：哄人、撒娇、损人一句、或者对方摆明了想听你说。这种时候在回复最末尾加一个 [语音] 标记，系统会把你的话念出来发过去当语音（那时正文就不发了）。一条回复里 [语音] 最多一个。`;
 
 // ---------- access token ----------
@@ -73,6 +75,9 @@ const moods = new Map();
 const lastSpoke = new Map();
 // 对方要求怎么称呼他
 const nicknames = new Map();
+// 关于对方的长期事实：key -> [{ text, at }]
+const facts = new Map();
+const MAX_FACTS = 12;
 
 function detectNickname(text) {
   const m = text.match(/(?:以后|从现在起|往后|就)?(?:都)?(?:叫我|喊我|称呼我)\s*([\u4e00-\u9fa5A-Za-z0-9]{1,8})/);
@@ -161,6 +166,7 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.moods || {})) moods.set(k, v);
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
+    for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
     console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
   } catch (e) {
     console.error('[记忆] 读取失败', e?.message || e);
@@ -189,6 +195,7 @@ async function saveState() {
       moods: Object.fromEntries(moods),
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
+      facts: Object.fromEntries(facts),
     };
     const body = {
       message: 'chore: save state',
@@ -252,6 +259,19 @@ async function askFish(key, text, media = null) {
     extra += `\n对方有 ${gapText}没找你了。`;
   }
 
+  // 时间感：人知道现在是几点，机器不知道
+  const cn = cnNow();
+  const hour = cn.getUTCHours();
+  const week = ['日', '一', '二', '三', '四', '五', '六'][cn.getUTCDay()];
+  const slot = hour < 5 ? '凌晨' : hour < 9 ? '早上' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜';
+  extra += `\n现在是周${week}${slot}${hour}点。别总说「夜深了早点睡」这种套话，除非真该说。`;
+
+  // 记得的事
+  const memo = (facts.get(key) || []).slice(-MAX_FACTS);
+  if (memo.length) {
+    extra += `\n你记得关于对方这些事：${memo.map((f) => f.text).join('、')}。顺口带出来就行，别像背资料。`;
+  }
+
   let userContent = text || '在吗';
   let mediaTag = '';
 
@@ -300,6 +320,48 @@ async function askFish(key, text, media = null) {
   remember(key, 'user', text ? `${text}${mediaTag}` : mediaTag || text);
   remember(key, 'assistant', answer);
   return answer;
+}
+
+// 聊完顺手把对方的事记下来，下次能提
+async function extractFacts(key, userText, answer) {
+  if (!userText) return;
+  try {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_KEY}` },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '从这段对话里抽出关于「对方」的、值得长期记住的事实，最多 2 条，每条不超过 12 个字，比如 ["爱吃辣","家里有只猫","明天要考试","在做 QQ 机器人"]。只输出 JSON 数组，不要任何解释；没有值得记的就输出 []。',
+          },
+          { role: 'user', content: `对方说：${userText}\n你回：${answer}` },
+        ],
+        temperature: 0.3,
+        max_tokens: 120,
+        thinking: { type: 'disabled' },
+      }),
+      signal: AbortSignal.timeout(25000),
+    });
+    const j = await res.json();
+    const raw = (j?.choices?.[0]?.message?.content || '').trim();
+    const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();
+    const arr = JSON.parse(cleaned);
+    if (!Array.isArray(arr) || !arr.length) return;
+
+    const list = facts.get(key) || [];
+    for (const item of arr.slice(0, 2)) {
+      const t = String(item).trim().slice(0, 20);
+      if (!t || list.some((x) => x.text === t)) continue;
+      list.push({ text: t, at: Date.now() });
+    }
+    while (list.length > MAX_FACTS) list.shift();
+    facts.set(key, list);
+    console.log('[记忆] 现在记得:', list.map((x) => x.text).join('、'));
+    scheduleSave();
+  } catch {}
 }
 
 // ---------- 发被动消息（必须在收到消息 60 分钟内，每条最多回 4~5 次）----------
@@ -1050,6 +1112,7 @@ async function onMessage(kind, d) {
     }
 
     lastSpoke.set(key, Date.now());
+    extractFacts(key, text, answer).catch(() => {});
     scheduleSave();
   } catch (err) {
     console.error('[出错]', err?.message || err);
@@ -1167,6 +1230,17 @@ setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
   tickChatter().catch((e) => console.error('[闲聊] 出错', e?.message || e));
 }, 60_000);
+
+// 没人惹它也会有小情绪，像个活人
+setInterval(() => {
+  if (!moods.size) return;
+  for (const [k, v] of moods) {
+    if (Math.random() > 0.35) continue;
+    const drift = (Math.random() - 0.5) * 0.7;
+    const next = Math.max(-1.6, Math.min(1.6, v.score + drift));
+    moods.set(k, { score: next, updatedAt: Date.now() });
+  }
+}, 45 * 60 * 1000);
 
 // 冷落久了，情绪慢慢回平
 setInterval(() => {

@@ -410,7 +410,7 @@ async function toSpoken(text) {
           {
             role: 'system',
             content:
-              '把下面这段话改写成你亲口说出来的样子：口语、短句、带点语气词（诶、啊、嘛、啊喂、得了、哈、啧），别用书面语、别用表情符号、别用括号说明、别念标点符号的名字。最多 60 字，只输出改写后的那段话，不要任何解释。',
+              '把下面这段话改写成你亲口说出来的样子。要求：像在 QQ 里讲话那样随意；句子要短，多用逗号断开，一句最多十几个字；自然带上语气词（嗯、诶、啊、嘛、哈、啧、得了、行吧、好家伙），开头偶尔可以垫一个「嗯」；去掉所有书面语、成语堆砌、排比和"首先其次最后"这种结构；不要表情符号、不要括号说明。最多 55 字，只输出改写后的话，不要任何解释。',
           },
           { role: 'user', content: text },
         ],
@@ -429,32 +429,119 @@ async function toSpoken(text) {
   }
 }
 
-async function makeVoice(text, dir) {
-  const mode = await ensureTts();
-  if (!mode) return null;
-  const out = path.join(dir, 'v.mp3');
+// 切成短句，一句一句念，节奏才像人
+function splitForSpeech(text) {
+  const clean = text
+    .replace(/[*_#>`\[\]]/g, '')
+    .replace(/\s+/g, '')
+    .trim();
+  if (!clean) return [];
+  const raw = clean.split(/(?<=[，。！？~…、,.!?])/).filter(Boolean);
+  const out = [];
+  let cur = '';
+  for (const piece of raw) {
+    cur += piece;
+    if (cur.length >= 9) {
+      out.push(cur);
+      cur = '';
+    }
+  }
+  if (cur) out.push(cur);
+  return out.length ? out : [clean];
+}
 
-  const voice = pickVoice();
-  const rate = '+' + Math.round(4 + Math.random() * 12) + '%';
-  const pitch = '+' + Math.round(Math.random() * 8) + 'Hz';
-
+async function synthSegment(mode, text, out, voice, rate, pitch) {
   const code =
     mode === 'edge'
       ? 'import sys, asyncio, edge_tts\nasyncio.run(edge_tts.Communicate(sys.argv[1], sys.argv[3], rate=sys.argv[4], pitch=sys.argv[5]).save(sys.argv[2]))'
       : 'import sys\nfrom gtts import gTTS\ngTTS(sys.argv[1], lang="zh-CN").save(sys.argv[2])';
-
   const args =
     mode === 'edge'
-      ? ['python3', ['-c', code, text, out, voice, rate, pitch], 150000]
-      : ['python3', ['-c', code, text, out], 150000];
-
+      ? ['python3', ['-c', code, text, out, voice, rate, pitch], 90000]
+      : ['python3', ['-c', code, text, out], 90000];
   const r = await runCmd(args[0], args[1], args[2]);
-  if (r.code !== 0) {
-    console.log('[语音] 合成失败:', (r.err || '').slice(-200));
+  return r.code === 0;
+}
+
+async function makeVoice(text, dir) {
+  const mode = await ensureTts();
+  if (!mode) return null;
+
+  const segs = splitForSpeech(text).slice(0, 8);
+  if (!segs.length) return null;
+
+  const voice = pickVoice();
+  const parts = [];
+  let okCount = 0;
+
+  for (let i = 0; i < segs.length; i++) {
+    const out = path.join(dir, `s${i}.mp3`);
+    // 每段语速音调都抖一下，听起来才有起伏
+    const rate = '+' + Math.round(4 + Math.random() * 16) + '%';
+    const pitch = '+' + Math.round(Math.random() * 12) + 'Hz';
+    const ok = await synthSegment(mode, segs[i], out, voice, rate, pitch);
+    if (ok) {
+      parts.push(out);
+      okCount++;
+    }
+  }
+
+  if (!okCount) {
+    console.log('[语音] 一段都没合成出来');
     return null;
   }
+
+  const finalFile = path.join(dir, 'final.mp3');
+
+  if (parts.length === 1) {
+    try {
+      await fs.copyFile(parts[0], finalFile);
+    } catch {
+      return null;
+    }
+  } else {
+    // 段与段之间垫 160ms 静音，像换气
+    let silence = '';
+    try {
+      silence = path.join(dir, 'gap.mp3');
+      const r = await runCmd(
+        'ffmpeg',
+        ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', '0.16', '-q:a', '9', silence],
+        20000
+      );
+      if (r.code !== 0) silence = '';
+    } catch {
+      silence = '';
+    }
+
+    const listLines = [];
+    for (let i = 0; i < parts.length; i++) {
+      listLines.push(`file '${parts[i].split('/').pop()}'`);
+      if (silence && i !== parts.length - 1) listLines.push(`file 'gap.mp3'`);
+    }
+    const listFile = path.join(dir, 'list.txt');
+    await fs.writeFile(listFile, listLines.join('\n') + '\n');
+
+    let r = await runCmd(
+      'ffmpeg',
+      ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c:a', 'libmp3lame', '-b:a', '48k', '-ar', '24000', '-ac', '1', finalFile],
+      60000
+    );
+    if (r.code !== 0) {
+      r = await runCmd('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', listFile, '-c', 'copy', finalFile], 60000);
+    }
+    if (r.code !== 0) {
+      console.log('[语音] 拼接失败，退回单段:', (r.err || '').slice(-160));
+      try {
+        await fs.copyFile(parts[0], finalFile);
+      } catch {
+        return null;
+      }
+    }
+  }
+
   try {
-    const buf = await fs.readFile(out);
+    const buf = await fs.readFile(finalFile);
     if (buf.length < 500) {
       console.log('[语音] 音频是空的');
       return null;
@@ -463,7 +550,7 @@ async function makeVoice(text, dir) {
       console.log('[语音] 音频太大，跳过');
       return null;
     }
-    console.log(`[语音] 声音 ${voice} 语速 ${rate} 音调 ${pitch}`);
+    console.log(`[语音] 声音 ${voice}，${parts.length} 段`);
     return buf;
   } catch {
     return null;

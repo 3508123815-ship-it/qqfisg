@@ -642,8 +642,8 @@ async function ensureChatTts() {
 function emotionFor(score = 0) {
   if (score >= 1.5) return { temp: 0.65, topP: 0.8, speed: 1.1, pitch: 1.1 };
   if (score >= 0.5) return { temp: 0.55, topP: 0.75, speed: 1.06, pitch: 1.08 };
-  if (score > -0.5) return { temp: 0.35, topP: 0.7, speed: 1.0, pitch: 1.05 };
-  if (score > -1.5) return { temp: 0.45, topP: 0.65, speed: 1.04, pitch: 1.02 };
+  if (score > -0.5) return { temp: 0.45, topP: 0.72, speed: 1.0, pitch: 1.05 };
+  if (score > -1.5) return { temp: 0.5, topP: 0.68, speed: 1.04, pitch: 1.02 };
   return { temp: 0.6, topP: 0.6, speed: 1.12, pitch: 1.0 };
 }
 
@@ -719,7 +719,12 @@ async function chatTtsVoice(text, dir, score = 0) {
     "    print('QSPKM:' + mature[1], flush=True)",
     "    print('chosen-f0', round(cute[0], 1), round(mature[0], 1), flush=True)",
     'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=float(sys.argv[3]), top_P=float(sys.argv[4]), top_K=20)',
-    'wavs = chat.infer([sys.argv[1]], params_infer_code=params, use_decoder=True)',
+    'params_refine_text = None',
+    'try:',
+    '    params_refine_text = ChatTTS.Chat.RefineTextParams(prompt=sys.argv[6])',
+    'except Exception as e:',
+    "    print('refine-unavailable', e, flush=True)",
+    'wavs = chat.infer([sys.argv[1]], params_refine_text=params_refine_text, params_infer_code=params, use_decoder=True)',
     'arr = np.asarray(wavs[0], dtype=np.float32).squeeze()',
     'pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)',
     "w = wave.open(sys.argv[2], 'wb')",
@@ -728,10 +733,13 @@ async function chatTtsVoice(text, dir, score = 0) {
   ].join('\n');
 
   const emo = emotionFor(score);
+  // 口语感：垫字、笑声、自然停顿；生气时收紧，开心时放开
+  const refine =
+    score >= 0.5 ? '[oral_2][laugh_1][break_5]' : score <= -0.5 ? '[oral_1][laugh_0][break_3]' : '[oral_1][laugh_0][break_4]';
   const t0 = Date.now();
   const r = await runCmd(
     'python3',
-    ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP), mode],
+    ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP), mode, refine],
     600000
   );
   if (r.code === 3) {
@@ -756,7 +764,7 @@ async function chatTtsVoice(text, dir, score = 0) {
     return null;
   }
   // 变调 + 变速：asetrate 抬高音调会连带加速，再用 atempo 拉回来
-  const pf = emo.pitch;
+  const pf = emo.pitch * (0.995 + Math.random() * 0.015);
   const tempo = Math.max(0.5, Math.min(2.0, emo.speed / pf));
   const filters = `asetrate=24000*${pf.toFixed(3)},aresample=24000,atempo=${tempo.toFixed(3)}`;
   const conv = await runCmd(

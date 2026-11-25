@@ -28,6 +28,24 @@ const GH_TOKEN = process.env.GH_TOKEN || '';
 const DATA_PATH = 'state.json';
 // 最近网上在聊什么（每轮开机拉一次，隔一阵再刷）
 let hotTopics = [];
+// 梗库：只进不出地攒，新的往后排，上限 300 条
+const memeBank = [];
+const MAX_MEMES = 300;
+function addMeme(t, d = '') {
+  const text = String(t || '').trim().replace(/^[「『"']|[」』"']$/g, '').slice(0, 24);
+  if (!text) return;
+  const def = String(d || '').trim().slice(0, 60);
+  const i = memeBank.findIndex((m) => m.t === text);
+  if (i >= 0) {
+    memeBank[i].at = Date.now();
+    if (def && def.length > (memeBank[i].d || '').length) memeBank[i].d = def;
+  } else {
+    memeBank.push({ t: text, d: def, at: Date.now() });
+    while (memeBank.length > MAX_MEMES) memeBank.shift();
+  }
+  scheduleSave();
+  console.log(`[梗库] ${i >= 0 ? '更新' : '收进'}：${text}${def ? '＝' + def : ''}（共 ${memeBank.length} 条）`);
+}
 let hotAt = 0;
 let hotFrom = '';
 let dataSha = '';
@@ -181,6 +199,9 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
+    for (const m of raw.memes || []) {
+      if (m && m.t) memeBank.push({ t: String(m.t).slice(0, 24), d: String(m.d || '').slice(0, 60), at: m.at || 0 });
+    }
     if (Array.isArray(raw.hot)) hotTopics = raw.hot;
     if (raw.hotAt) hotAt = raw.hotAt;
     if (raw.hotFrom) hotFrom = raw.hotFrom;
@@ -217,6 +238,7 @@ async function saveState() {
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
+      memes: memeBank,
       hot: hotTopics,
       hotAt,
       hotFrom,
@@ -355,6 +377,10 @@ async function askFish(key, text, media = null) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
+  if (memeBank.length) {
+    const memes = memeBank.slice(-14);
+    extra += `\n你攒着这些网络梗：${memes.map((m) => (m.d ? `${m.t}（${m.d}）` : m.t)).join('；')}。聊到合适的地方顺口用一下就行，别硬套，也别解释「这个梗是什么意思」。`;
+  }
   if (hotTopics.length && Date.now() - hotAt < 8 * 3600 * 1000) {
     extra += `\n最近网上在聊这些：${hotTopics.slice(0, 10).join('、')}。要是对方聊到对得上的，可以顺口接一句；对不上就别硬提，别背标题、别像报新闻。遇到你不认识的新梗，直接问「这啥梗」或者「鱼没跟上」，别装懂。`;
   }
@@ -448,7 +474,7 @@ async function extractFacts(key, userText, answer) {
           {
             role: 'system',
             content:
-              '从这段对话里抽出关于「对方」的、值得长期记住的事实，最多 2 条，每条不超过 12 个字，比如 ["爱吃辣","家里有只猫","明天要考试","在做 QQ 机器人"]。只输出 JSON 数组，不要任何解释；没有值得记的就输出 []。',
+              '从这段对话里抽两样东西，只输出 JSON 对象，不要解释：{"facts":[最多 2 条关于「对方」的长期事实，每条≤12 字，比如"爱吃辣""家里有只猫""在做QQ机器人"],"memes":[{"t":"网络梗或流行语原文，≤14 字","d":"它啥意思，≤40 字；吃不准就填空串"}]}。memes 只收真的网络梗、流行语、新说法（比如"city不city""班味""显眼包"），没有就 []，别把普通词当事。',
           },
           { role: 'user', content: `对方说：${userText}\n你回：${answer}` },
         ],
@@ -461,9 +487,14 @@ async function extractFacts(key, userText, answer) {
     const j = await res.json();
     const raw = (j?.choices?.[0]?.message?.content || '').trim();
     const cleaned = raw.replace(/```json/g, '').replace(/```/g, '').trim();
-    const arr = JSON.parse(cleaned);
-    if (!Array.isArray(arr) || !arr.length) return;
+    const parsed = JSON.parse(cleaned);
+    const arr = Array.isArray(parsed) ? parsed : parsed?.facts || [];
 
+    for (const m of (Array.isArray(parsed) ? [] : parsed?.memes || []).slice(0, 3)) {
+      if (m && m.t) addMeme(m.t, m.d);
+    }
+
+    if (!Array.isArray(arr) || !arr.length) return;
     const list = facts.get(key) || [];
     for (const item of arr.slice(0, 2)) {
       const t = String(item).trim().slice(0, 20);
@@ -1351,6 +1382,9 @@ async function processTurn(kind, openid, text, media, msgId) {
   lastUserAt.set(key, Date.now());
   nagDue.delete(key); // 人回来了，不闹了
   const score = updateMood(key, text);
+
+  const taught = text.match(/(?:记住|记一下|记着)(?:这个)?梗[:：\s]*(.{2,80})/);
+  if (taught) addMeme(taught[1].trim(), '');
 
   const askedNick = detectNickname(text);
   if (askedNick) {

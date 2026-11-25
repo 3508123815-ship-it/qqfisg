@@ -538,7 +538,7 @@ async function toSpoken(text, score = 0) {
                 : score > 0.5
                   ? '你心情不错，说话带笑，尾音可以拖一点，语气轻快。'
                   : '你语气随便，像跟熟人唠嗑，偶尔带点撒娇的软。') +
-              '把下面这段话改写成你亲口说出来的样子。要求：像在 QQ 里讲话那样随意；句子要短，多用逗号断开，一句最多十几个字；自然带上语气词（嗯、诶、啊、嘛、哈、啧、得了、行吧、好家伙），开头偶尔可以垫一个「嗯」；去掉所有书面语、成语堆砌、排比和"首先其次最后"这种结构；不要表情符号、不要括号说明。最多 55 字，只输出改写后的话，不要任何解释。',
+              '把下面这段话改写成你亲口说出来的样子。要求：像跟朋友当面说话那样一口气顺下来，别一顿一顿的——一句可以长到二十来字，中间最多两三个逗号，千万别三五个字就断一下；语气词自然带一点（嗯、诶、啊、嘛、哈、啧、得了、行吧），别每句都塞；去掉所有书面语、成语堆砌、排比和"首先其次最后"这种结构；不要表情符号、不要括号说明、不要排成一句一行。最多 70 字，只输出改写后的话，不要任何解释。',
           },
           { role: 'user', content: text },
         ],
@@ -569,7 +569,7 @@ function splitForSpeech(text) {
   let cur = '';
   for (const piece of raw) {
     cur += piece;
-    if (cur.length >= 7) {
+    if (cur.length >= 13) {
       out.push(cur);
       cur = '';
     }
@@ -582,12 +582,12 @@ function splitForSpeech(text) {
 // 心情直接改成声音：急、冲、拖、软
 function voiceParams(score = 0) {
   const rnd = (a, b) => a + Math.random() * (b - a);
-  if (score >= 1.5) return { rate: '+' + Math.round(rnd(10, 20)) + '%', pitch: '+' + Math.round(rnd(10, 18)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.18 };
-  if (score >= 0.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '+' + Math.round(rnd(7, 14)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.2 };
-  if (score > -0.5) return { rate: '+' + Math.round(rnd(0, 8)) + '%', pitch: '+' + Math.round(rnd(4, 11)) + 'Hz', volume: '+0%', gap: 0.26 };
-  if (score > -1.5) return { rate: '+' + Math.round(rnd(4, 12)) + '%', pitch: '+' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.2 };
+  if (score >= 1.5) return { rate: '+' + Math.round(rnd(10, 20)) + '%', pitch: '+' + Math.round(rnd(10, 18)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.1 };
+  if (score >= 0.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '+' + Math.round(rnd(7, 14)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.1 };
+  if (score > -0.5) return { rate: '+' + Math.round(rnd(0, 8)) + '%', pitch: '+' + Math.round(rnd(4, 11)) + 'Hz', volume: '+0%', gap: 0.12 };
+  if (score > -1.5) return { rate: '+' + Math.round(rnd(4, 12)) + '%', pitch: '+' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.1 };
   // 真生气了：又急又冲，音调压低带刺，停顿短（但底子还是女声）
-  return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '-' + Math.round(rnd(0, 5)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.12 };
+  return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '-' + Math.round(rnd(0, 5)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.06 };
 }
 
 async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
@@ -649,10 +649,9 @@ function emotionFor(score = 0) {
 
 // 生气时把逗号变成短停顿，重话更冲
 function textForChatTts(text, score) {
-  let t = text.replace(/[\r\n]+/g, '，');
-  if (score >= 0.5) t = t.replace(/，/g, '，[uv_break]');
-  if (score < -0.5) t = t.replace(/，/g, '，[uv_break]');
-  return t.slice(0, 120);
+  // 逗号后塞 [uv_break] 会让它一顿一顿的，这里只用自然的逗号停顿
+  let t = text.replace(/[\r\n]+/g, '，').replace(/[，]{2,}/g, '，');
+  return t.slice(0, 140);
 }
 
 async function chatTtsVoice(text, dir, score = 0) {
@@ -735,7 +734,7 @@ async function chatTtsVoice(text, dir, score = 0) {
   const emo = emotionFor(score);
   // 口语感：垫字、笑声、自然停顿；生气时收紧，开心时放开
   const refine =
-    score >= 0.5 ? '[oral_2][laugh_1][break_5]' : score <= -0.5 ? '[oral_1][laugh_0][break_3]' : '[oral_1][laugh_0][break_4]';
+    score >= 0.5 ? '[oral_2][laugh_1][break_1]' : score <= -0.5 ? '[oral_1][laugh_0][break_0]' : '[oral_1][laugh_0][break_1]';
   const t0 = Date.now();
   const r = await runCmd(
     'python3',

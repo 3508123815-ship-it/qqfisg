@@ -458,6 +458,90 @@ async function refreshHot() {
   return true;
 }
 
+
+// ---------- 梗 wiki：6900+ 条，聊天前先查一遍 ----------
+// 数据来自 thawline/dsh-memewiki（MIT），原始出处 cnmeme.wiki，见 MEMES-WIKI.md
+let MEME_WIKI = [];
+try {
+  const raw = fs.readFileSync(path.join(process.cwd(), 'memes-wiki.json'), 'utf8');
+  const arr = JSON.parse(raw);
+  MEME_WIKI = arr.map(([t, g, u, a, tags]) => ({ t, g, u, a: a ? a.split(/[、,，]/).filter(Boolean) : [], tags: tags ? tags.split('、').filter(Boolean) : [] }));
+  console.log(`[梗wiki] 载入 ${MEME_WIKI.length} 条`);
+} catch (e) {
+  console.log('[梗wiki] 没载入', e?.message || e);
+}
+
+// 在对方这句话里找梗：标题或别名出现在句子里，长标题优先
+function findMemes(text, limit = 3) {
+  if (!text || !MEME_WIKI.length) return [];
+  const t = text.replace(/\s+/g, '');
+  const hits = [];
+  const shortOk = t.length <= 12; // 两个字的词不当锚点，除非对方就说了那么短
+  for (const m of MEME_WIKI) {
+    const names = [m.t, ...(m.a || [])].filter((x) => x && x.length >= 2);
+    if (!shortOk && names.every((n) => n.length <= 2)) continue;
+    if (names.some((n) => (shortOk || n.length >= 3) && t.includes(n.replace(/\s+/g, '')))) hits.push(m);
+    if (hits.length >= 30) break;
+  }
+  hits.sort((a, b) => b.t.length - a.t.length);
+  return hits.slice(0, limit);
+}
+
+// 对方问「这啥梗」时，直接把词条给出去
+function memeQuery(text) {
+  const m = text.match(/(?:这|那|这是|那是)?(?:是)?(?:个|一个)?(?:什么|啥|哪个)(?:梗|意思)|啥梗|什么梗|梗是啥|咋来的/);
+  return !!m;
+}
+
+// 八股打回：发出去之前过一道，像模板就打回重写
+const STOCK_RE =
+  /(首先|其次|再次|综上所述|总而言之|总的来说|值得一提的是|需要注意的是|不难看出|希望对你有帮助|希望能帮到你|作为一个?(?:AI|人工智能)|我是一个?(?:AI|人工智能)|未来可期|相信自己|你可以的|保持积极|放平心态|一切都会好起来)/;
+const FRAME_RE =
+  /(不是[^。！？\n]{1,20}而是|与其说[^。！？\n]{1,20}(?:不如说|不如)|看似[^。！？\n]{1,20}(?:实则|其实|实际)|不仅[^。！？\n]{1,24}(?:更|还|而且)|不在于[^。！？\n]{1,20}(?:而在于))/;
+
+function needsPolish(text) {
+  if (!text) return false;
+  if (/\*\*|(^|\n)\s*(?:[-*•]|#{1,6})\s/.test(text)) return true;
+  if (text.length > 180) return true;
+  if (STOCK_RE.test(text)) return true;
+  if (FRAME_RE.test(text)) return true;
+  const rows = text.split('\n').filter(Boolean).length;
+  if (rows >= 4) return true;
+  return false;
+}
+
+async function polishAnswer(text) {
+  if (!needsPolish(text)) return text;
+  console.log('[八股] 打回重写:', text.slice(0, 30));
+  try {
+    const res = await fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_KEY}` },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [
+          {
+            role: 'system',
+            content:
+              '把下面这句话改回人在 QQ 里随口打出来的样子：短、口语、一两句；删掉所有套话、排比、「首先其次」「不是A而是B」这类结构；不要列表、不要标题、不要加粗；意思别变，别加解释。只输出改写后的话。',
+          },
+          { role: 'user', content: text },
+        ],
+        temperature: 1.1,
+        max_tokens: 300,
+        thinking: { type: 'disabled' },
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    const j = await res.json();
+    const out = j?.choices?.[0]?.message?.content?.trim();
+    return out || text;
+  } catch (e) {
+    console.log('[八股] 改写失败，原文发', e?.message || e);
+    return text;
+  }
+}
+
 // ---------- 叫模型 ----------
 async function askFish(key, text, media = null) {
   const score = moodScore(key);
@@ -473,6 +557,13 @@ async function askFish(key, text, media = null) {
   if (gapMin >= 30) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
+  }
+  const found = findMemes(text);
+  if (found.length) {
+    const lines = found.map((m) => `${m.t}：${m.g || ''}${m.u ? '；怎么用：' + m.u : ''}`).join('\n');
+    extra += `\n对方这话里提到了这些梗，你都知道是什么意思：\n${lines}\n顺着接就行，别背解释，别提「词条」。`;
+  } else if (memeQuery(text)) {
+    extra += `\n对方在问你这是个什么梗。你要是不确定，就直说「鱼没听过这个」，别瞎编。`;
   }
   if (memeBank.length) {
     const memes = memeBank.slice(-14);
@@ -1569,6 +1660,9 @@ async function processTurn(kind, openid, text, media, msgId) {
       voiceByModel = true;
       answer = answer.replace(/\[语音\]/g, '').trim();
     }
+
+    // 发出去之前过一道：像模板就重写
+    answer = await polishAnswer(answer);
 
     // 明着要图的，先甩一张，别废话
     const wantsMeme = /(表情包|表情|来张图|发张图|发个图|整张图)/.test(text) && text.length <= 20;

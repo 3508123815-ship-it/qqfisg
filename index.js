@@ -175,6 +175,7 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
+    if (raw.spkFemale === 1 && raw.spk) chatSpk = raw.spk;
     console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
   } catch (e) {
     console.error('[记忆] 读取失败', e?.message || e);
@@ -204,6 +205,8 @@ async function saveState() {
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
+      spkFemale: chatSpk ? 1 : 0,
+      spk: chatSpk || '',
     };
     const body = {
       message: 'chore: save state',
@@ -598,6 +601,8 @@ async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
 
 // ---------- ChatTTS：更真的对话腔，装不上就退回 edge ----------
 let chatterState = ''; // '' 未试 · 'ok' 能用 · 'broken' 放弃
+// 挑好的女声声纹（存在 state.json 里，换轮不换声）
+let chatSpk = '';
 
 async function ensureChatTts() {
   if (chatterState === 'ok') return true;
@@ -645,6 +650,14 @@ function textForChatTts(text, score) {
 async function chatTtsVoice(text, dir, score = 0) {
   const wav = path.join(dir, 'chat.wav');
   const mp3 = path.join(dir, 'chat.mp3');
+
+  // 之前挑好的女声（存在 state 里，换轮也接着用）
+  const spkFile = '/tmp/qqfish_spk.txt';
+  try {
+    if (chatSpk) await fs.writeFile(spkFile, chatSpk);
+    else await fs.rm(spkFile, { force: true });
+  } catch {}
+
   const script = [
     'import sys, os',
     'import numpy as np, wave',
@@ -652,11 +665,39 @@ async function chatTtsVoice(text, dir, score = 0) {
     'chat = ChatTTS.Chat()',
     'chat.load(compile=False)',
     "spk_file = '/tmp/qqfish_spk.txt'",
+    'def f0_med(y, sr=24000):',
+    '    y = np.asarray(y, dtype=np.float32).squeeze()',
+    '    if y.ndim > 1: y = y[0]',
+    '    y = y - y.mean()',
+    '    frame = 1024; hop = 512; vals = []',
+    '    for i in range(0, max(0, len(y) - frame), hop):',
+    '        f = y[i:i+frame]',
+    "        r = np.correlate(f, f, 'full')[frame-1:]",
+    '        r = r / (r[0] + 1e-9)',
+    '        lo = int(sr / 400.0); hi = int(sr / 80.0)',
+    '        seg = r[lo:hi]',
+    '        if len(seg) == 0: continue',
+    '        k = int(np.argmax(seg)) + lo',
+    '        if seg.max() > 0.3: vals.append(sr / float(k))',
+    '    return float(np.median(vals)) if vals else 0.0',
+    "spk = ''",
     'if os.path.exists(spk_file):',
     "    spk = open(spk_file).read().strip()",
-    'else:',
-    '    spk = chat.sample_random_speaker()',
+    'if not spk:',
+    '    for i in range(6):',
+    '        s = chat.sample_random_speaker()',
+    '        p0 = ChatTTS.Chat.InferCodeParams(spk_emb=s, temperature=0.3, top_P=0.7, top_K=20)',
+    "        w0 = chat.infer(['嗯，你好呀'], params_infer_code=p0, use_decoder=True)",
+    '        f = f0_med(w0[0])',
+    "        print('probe', i, round(f, 1), flush=True)",
+    '        if f >= 175:',
+    '            spk = s',
+    '            break',
+    '    if not spk:',
+    "        print('female-not-found', flush=True)",
+    '        sys.exit(3)',
     "    open(spk_file, 'w').write(spk)",
+    "    print('QSPK:' + spk, flush=True)",
     'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=float(sys.argv[3]), top_P=float(sys.argv[4]), top_K=20)',
     'wavs = chat.infer([sys.argv[1]], params_infer_code=params, use_decoder=True)',
     'arr = np.asarray(wavs[0], dtype=np.float32).squeeze()',
@@ -668,10 +709,20 @@ async function chatTtsVoice(text, dir, score = 0) {
 
   const emo = emotionFor(score);
   const t0 = Date.now();
-  const r = await runCmd('python3', ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP)], 300000);
+  const r = await runCmd('python3', ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP)], 600000);
+  if (r.code === 3) {
+    console.log('[语音] ChatTTS 没挑到女声，退回 edge（edge 全是女声）');
+    return null;
+  }
   if (r.code !== 0) {
     console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-900));
     return null;
+  }
+  const m = (r.out || '').match(/QSPK:([^\s]+)/);
+  if (m && m[1] && m[1] !== chatSpk) {
+    chatSpk = m[1];
+    scheduleSave();
+    console.log('[语音] 挑到女声了，已记下（以后一直用这个）');
   }
   const ff = await ensureFfmpeg();
   if (!ff) {

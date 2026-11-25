@@ -175,7 +175,10 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
-    if (raw.spkVer === 2 && raw.spk) chatSpk = raw.spk;
+    if (raw.spkVer === 3) {
+      if (raw.spkCute) chatSpkCute = raw.spkCute;
+      if (raw.spkMature) chatSpkMature = raw.spkMature;
+    }
     console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
   } catch (e) {
     console.error('[记忆] 读取失败', e?.message || e);
@@ -205,8 +208,9 @@ async function saveState() {
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
-      spkVer: 2,
-      spk: chatSpk || '',
+      spkVer: 3,
+      spkCute: chatSpkCute || '',
+      spkMature: chatSpkMature || '',
     };
     const body = {
       message: 'chore: save state',
@@ -489,24 +493,25 @@ async function ensureTts() {
   return '';
 }
 
-// 有几个声音换着用，别每次一个调调（都是女声，偏软萌）
-const VOICE_POOL = [
-  { name: 'zh-CN-XiaoyiNeural', weight: 45 },       // 甜，撒娇
-  { name: 'zh-CN-XiaoshuangNeural', weight: 35 },   // 童声，最萌
-  { name: 'zh-CN-XiaoxiaoNeural', weight: 14 },     // 自然
-  { name: 'zh-CN-liaoning-XiaobeiNeural', weight: 6 }, // 东北，偶尔来一句
+// 声音跟着心情走：心情好=软萌，心情差=御姐
+const VOICE_CUTE = [
+  { name: 'zh-CN-XiaoyiNeural', weight: 55 },      // 甜，撒娇
+  { name: 'zh-CN-XiaoshuangNeural', weight: 35 },  // 童声，最萌
+  { name: 'zh-CN-XiaoxiaoNeural', weight: 10 },
+];
+const VOICE_MATURE = [
+  { name: 'zh-CN-XiaoxuanNeural', weight: 40 },    // 御姐，播音腔
+  { name: 'zh-CN-XiaoxiaoNeural', weight: 40 },    // 沉稳女声
+  { name: 'zh-CN-liaoning-XiaobeiNeural', weight: 12 }, // 东北御姐，带冲劲
+  { name: 'zh-CN-XiaoyiNeural', weight: 8 },       // 压着火的小甜
 ];
 
 function pickVoice(score = 0) {
-  // 心情好偏软萌，火大了声线还是女声，但语气冲
-  const pool = VOICE_POOL.map((v) => {
-    let w = v.weight;
-    if (v.name.includes('liaoning')) w = score < -0.5 ? 28 : score > 0.5 ? 4 : 8;
-    if (v.name.includes('Xiaoshuang')) w = score > 0.5 ? 40 : 30;
-    if (v.name.includes('Xiaoyi')) w = score > 0.5 ? 55 : 45;
-    if (v.name.includes('Xiaoxiao')) w = score < -0.5 ? 18 : 12;
-    return { name: v.name, weight: w };
-  });
+  // 心情好偏软萌，心情差换御姐；中间地带两边混着来
+  let pool;
+  if (score >= 0.35) pool = VOICE_CUTE.map((v) => ({ ...v }));
+  else if (score <= -0.35) pool = VOICE_MATURE.map((v) => ({ ...v }));
+  else pool = [...VOICE_CUTE.map((v) => ({ name: v.name, weight: v.weight * 0.6 })), ...VOICE_MATURE.map((v) => ({ name: v.name, weight: v.weight * 0.4 }))];
   const total = pool.reduce((a, v) => a + v.weight, 0);
   let r = Math.random() * total;
   for (const v of pool) {
@@ -603,8 +608,9 @@ async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
 
 // ---------- ChatTTS：更真的对话腔，装不上就退回 edge ----------
 let chatterState = ''; // '' 未试 · 'ok' 能用 · 'broken' 放弃
-// 挑好的女声声纹（存在 state.json 里，换轮不换声）
-let chatSpk = '';
+// 挑好的两把女声声纹：萌 / 御姐（存在 state.json 里，换轮不换声）
+let chatSpkCute = '';
+let chatSpkMature = '';
 
 async function ensureChatTts() {
   if (chatterState === 'ok') return true;
@@ -653,10 +659,12 @@ async function chatTtsVoice(text, dir, score = 0) {
   const wav = path.join(dir, 'chat.wav');
   const mp3 = path.join(dir, 'chat.mp3');
 
-  // 之前挑好的女声（存在 state 里，换轮也接着用）
+  // 心情好=萌，心情不好=御姐；两把都存着，按心情切
+  const mode = score >= 0 ? 'cute' : 'mature';
   const spkFile = '/tmp/qqfish_spk.txt';
+  const chosen = mode === 'cute' ? chatSpkCute || chatSpkMature : chatSpkMature || chatSpkCute;
   try {
-    if (chatSpk) await fs.writeFile(spkFile, chatSpk);
+    if (chosen) await fs.writeFile(spkFile, chosen);
     else await fs.rm(spkFile, { force: true });
   } catch {}
 
@@ -686,32 +694,30 @@ async function chatTtsVoice(text, dir, score = 0) {
     'if os.path.exists(spk_file):',
     "    spk = open(spk_file).read().strip()",
     'if not spk:',
-    '    best_s = ""',
-    '    best_f = 0.0',
-    '    best_score = -1e9',
+    '    mode = sys.argv[5] if len(sys.argv) > 5 else "cute"',
+    '    cands = []',
     '    for i in range(5):',
     '        s = chat.sample_random_speaker()',
     '        p0 = ChatTTS.Chat.InferCodeParams(spk_emb=s, temperature=0.3, top_P=0.7, top_K=20)',
     "        w0 = chat.infer(['嗯，你好呀'], params_infer_code=p0, use_decoder=True)",
     '        f = f0_med(w0[0])',
     "        print('probe', i, round(f, 1), flush=True)",
-    '        if f < 160:',
-    '            continue',
-    '        # 200~300Hz 偏软萌，160~200Hz 是御姐那种，也给过，稍微往后排',
-    '        sc = f if f <= 330 else 330 - (f - 330)',
-    '        if f < 200:',
-    '            sc -= 40',
-    '        if sc > best_score:',
-    '            best_score = sc',
-    '            best_s = s',
-    '            best_f = f',
-    '    if not best_s:',
+    '        if f >= 155:',
+    '            cands.append((f, s))',
+    '    if not cands:',
     "        print('female-not-found', flush=True)",
     '        sys.exit(3)',
-    '    spk = best_s',
-    "    print('chosen-f0', round(best_f, 1), flush=True)",
-    "    open(spk_file, 'w').write(spk)",
-    "    print('QSPK:' + spk, flush=True)",
+    '    def cute_key(c):',
+    '        f = c[0]',
+    '        sc = f if f <= 330 else 330 - (f - 330)',
+    '        return sc - (45 if f < 200 else 0)',
+    '    cute = max(cands, key=cute_key)',
+    '    mats = [c for c in cands if 155 <= c[0] <= 205]',
+    '    mature = min(mats, key=lambda c: c[0]) if mats else min(cands, key=lambda c: c[0])',
+    '    spk = cute[1] if mode == "cute" else mature[1]',
+    "    print('QSPKC:' + cute[1], flush=True)",
+    "    print('QSPKM:' + mature[1], flush=True)",
+    "    print('chosen-f0', round(cute[0], 1), round(mature[0], 1), flush=True)",
     'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=float(sys.argv[3]), top_P=float(sys.argv[4]), top_K=20)',
     'wavs = chat.infer([sys.argv[1]], params_infer_code=params, use_decoder=True)',
     'arr = np.asarray(wavs[0], dtype=np.float32).squeeze()',
@@ -723,7 +729,11 @@ async function chatTtsVoice(text, dir, score = 0) {
 
   const emo = emotionFor(score);
   const t0 = Date.now();
-  const r = await runCmd('python3', ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP)], 600000);
+  const r = await runCmd(
+    'python3',
+    ['-c', script, textForChatTts(text, score), wav, String(emo.temp), String(emo.topP), mode],
+    600000
+  );
   if (r.code === 3) {
     console.log('[语音] ChatTTS 没挑到女声，退回 edge（edge 全是女声）');
     return null;
@@ -732,11 +742,13 @@ async function chatTtsVoice(text, dir, score = 0) {
     console.log('[语音] ChatTTS 合成失败，退回 edge:', (r.err || '').slice(-900));
     return null;
   }
-  const m = (r.out || '').match(/QSPK:([^\s]+)/);
-  if (m && m[1] && m[1] !== chatSpk) {
-    chatSpk = m[1];
+  const mc = (r.out || '').match(/QSPKC:([^\s]+)/);
+  const mm = (r.out || '').match(/QSPKM:([^\s]+)/);
+  if (mc && mc[1]) chatSpkCute = mc[1];
+  if (mm && mm[1]) chatSpkMature = mm[1];
+  if (mc || mm) {
     scheduleSave();
-    console.log('[语音] 挑到女声了，已记下（以后一直用这个）');
+    console.log(`[语音] 两把声音都挑好了：这次用 ${mode === 'cute' ? '萌' : '御姐'} 那把（心情 ${score.toFixed(2)}）`);
   }
   const ff = await ensureFfmpeg();
   if (!ff) {

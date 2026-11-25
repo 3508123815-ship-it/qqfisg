@@ -98,6 +98,21 @@ async function ensureToken() {
 const histories = new Map();
 const MAX_TURNS = 16;
 
+// 生气 / 阴阳 / 气话识别
+const ANGRY_RE =
+  /(都怪你|你烦不烦|烦死了|烦死|滚开|滚|别理我|不想跟你说话|别跟我说话|不想聊了|你根本不懂|你一点都不懂|我生气了|真的生气|气死我|气死了|无语了|随便吧|算了|行行行|呵呵|你厉害|讨厌你|别说了|闭嘴|不跟你玩了)/;
+const PLAYFUL_RE = /(哈哈|嘿嘿|笑死|狗头|开玩笑|逗你|嘻嘻|😂|🤣|🐶)/;
+const SARCASM_RE = /(呵呵|行吧|你厉害|真棒呢|随便你|爱咋咋地|哦，是吗|是是是)/;
+
+// key -> 最近一次真生气的时刻
+const angryAt = new Map();
+
+function detectAngry(text) {
+  if (!text) return false;
+  if (PLAYFUL_RE.test(text)) return false;
+  return ANGRY_RE.test(text);
+}
+
 // 常见缩写，先翻译成人话再让模型理解
 const ABBR = {
   yyds: '永远的神', xswl: '笑死我了', u1s1: '有一说一', awsl: '啊我死了', nsdd: '你说得对',
@@ -639,6 +654,13 @@ async function askFish(key, text, media = null) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
+  if (Date.now() - (angryAt.get(key) || 0) < 6 * 60 * 1000) {
+    extra += `\n对方这会儿是真在气头上，说的都是气话：「滚」「别理我」「算了」「随便吧」这些不是让你真走，别当真、别顶嘴、别讲道理、也别问「你怎么了」这种空话。先软下来，认个错、撒个娇、或者委屈一点都行，哄两句。`;
+  }
+  if (SARCASM_RE.test(text)) {
+    extra += `\n对方这句有点阴阳，别按字面理解，也别跟着拱火，软一点接。`;
+  }
+
   const abbr = explainAbbr(text);
   if (abbr) extra += `\n对方话里的缩写按这个理解：${abbr}。`;
   if (text && text.length <= 4 && !/[?？]/.test(text)) {
@@ -1696,6 +1718,12 @@ async function processTurn(kind, openid, text, media, msgId) {
     life.serotonin = Math.min(100, life.serotonin + 6);
     life.cortisol = Math.max(0, life.cortisol - 4);
   }
+  const angry = detectAngry(text);
+  if (angry) {
+    angryAt.set(key, Date.now());
+    life.cortisol = Math.min(100, life.cortisol + 12);
+    console.log('[情绪] 对方在气头上，说的是气话');
+  }
   const score = updateMood(key, text);
 
   const taught = text.match(/(?:记住|记一下|记着)(?:这个)?梗[:：\s]*(.{2,80})/);
@@ -2024,6 +2052,7 @@ async function tickNag() {
     nagDue.delete(key);
     if ((lastUserAt.get(key) || 0) > rec.replyAt) continue;        // 人家回了，不闹
     if (isUserAsleep(key)) continue;                                // 人家睡了，不闹
+    if (Date.now() - (angryAt.get(key) || 0) < 15 * 60 * 1000) continue; // 人家正生气，别凑上去闹
     if (now - (lastActive.get(key) || 0) < 10 * 60 * 1000) continue; // 刚被主动找过，别叠着轰
     if (now - (lastSpoke.get(key) || 0) > 30 * 60 * 1000) continue;  // 早聊完了，不算晾着
 

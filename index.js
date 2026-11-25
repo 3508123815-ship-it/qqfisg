@@ -58,6 +58,7 @@ const PERSONA = `你是「蓝色大肥鱼」，一只可爱的蓝色鲸鱼娘，
 你也懂游戏：手游、端游、主机都接触过，知道现在大家在玩什么，能接上「上分」「开黑」「抽卡歪了」这些话题。但别装成什么都精，没玩过的就说没玩过。
 但你是随口聊天的，不是百科全书：建议说一两句就够，别列清单、别科普。具体到某个城市今天几度、某个店的价格这种你不知道的，就说不知道，或者反问一句，别瞎编数字。
 说话像真实的 QQ 群友：口语化、短句、不长篇大论，一两句话说清，很少用列表和标题。
+你要真的听懂对方在说什么：别人打字快，会打错字、漏字、说半句、用缩写和拼音（yyds、xswl、u1s1 这种），也可能只是随口「嗯」「哦」一声。先按最可能的意思理解再回；拿不准就问一句「你是说…吗」，别硬猜、别答偏。对方说反话、阴阳你，也听得出来。
 你说话带着软乎劲儿：爱用「呀、啦、嘛、诶嘿、嘿嘿」这些语气词，偶尔叠一下词（好耶、怕怕、蹭蹭、乖乖），句尾有时拖个波浪号「~」。高兴、撒娇、被摸头的时候最明显。但别每句都来，也别装成小奶音——你还有傲娇那股劲儿，软里带点刺才像你。
 可以开玩笑、发表情、吐槽，但不要恶意攻击别人。
 不知道的事就承认不知道，不要编造。
@@ -96,6 +97,28 @@ async function ensureToken() {
 // ---------- 对话记忆（只在内存里，重启即清空）----------
 const histories = new Map();
 const MAX_TURNS = 16;
+
+// 常见缩写，先翻译成人话再让模型理解
+const ABBR = {
+  yyds: '永远的神', xswl: '笑死我了', u1s1: '有一说一', awsl: '啊我死了', nsdd: '你说得对',
+  dddd: '懂的都懂', zqsg: '真情实感', pyq: '朋友圈', xdm: '兄弟们', jms: '姐妹们',
+  nb: '牛逼', yygq: '阴阳怪气', emo: '情绪低落', pua: '精神控制', kswl: '磕死我了',
+  bdjw: '不懂就问', srds: '虽然但是', yjjc: '一骑绝尘', gkd: '搞快点', dbq: '对不起',
+  thx: '谢谢', plz: '请', sry: '抱歉', lol: '笑', hhh: '哈哈哈', 555: '呜呜呜', orz: '跪了',
+  cxk: '蔡徐坤', ikun: '爱坤', yyqx: '易烊千玺', cp: '配对', be: '悲剧结局', he: '圆满结局',
+  ghs: '搞黄色', lsp: '老色批', yp: '约炮', jc: '警察', sb: '傻逼', nmsl: '骂人话', cnmb: '骂人话',
+};
+
+function explainAbbr(text) {
+  if (!text) return '';
+  const tokens = text.match(/[a-zA-Z0-9]{2,}/g) || [];
+  const hits = [];
+  for (const t of tokens) {
+    const k = t.toLowerCase();
+    if (ABBR[k] && !hits.includes(`${k}=${ABBR[k]}`)) hits.push(`${k}=${ABBR[k]}`);
+  }
+  return hits.slice(0, 6).join('；');
+}
 
 // 心情：-2 很气 · -1 不太高兴 · 0 平常 · 1 挺好 · 2 特别开心
 const moods = new Map();
@@ -616,6 +639,15 @@ async function askFish(key, text, media = null) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
+  const abbr = explainAbbr(text);
+  if (abbr) extra += `\n对方话里的缩写按这个理解：${abbr}。`;
+  if (text && text.length <= 4 && !/[?？]/.test(text)) {
+    extra += `\n对方就回了这么几个字，可能是随口应一声、也可能是接着说上一句。别过度解读，顺着接就行。`;
+  }
+  if (text && /(你是说|啥意思|没听懂|什么意思|\?)$/.test(text)) {
+    extra += `\n对方可能在确认你的意思。先把话说清楚，别绕。`;
+  }
+
   const gs = findGames(text);
   if (gs.length) {
     extra += `\n对方说到这些游戏，你都熟：${gs.map((g) => `${g[0]}（${g[1]}，${g[2]}，${g[3]}）`).join('；')}。顺着聊，别像念资料。`;

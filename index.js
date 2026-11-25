@@ -175,7 +175,7 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
-    if (raw.spkFemale === 1 && raw.spk) chatSpk = raw.spk;
+    if (raw.spkVer === 2 && raw.spk) chatSpk = raw.spk;
     console.log(`[记忆] 恢复 ${histories.size} 段对话、${friends.size} 个熟人`);
   } catch (e) {
     console.error('[记忆] 读取失败', e?.message || e);
@@ -205,7 +205,7 @@ async function saveState() {
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
-      spkFemale: chatSpk ? 1 : 0,
+      spkVer: 2,
       spk: chatSpk || '',
     };
     const body = {
@@ -489,20 +489,22 @@ async function ensureTts() {
   return '';
 }
 
-// 有几个声音换着用，别每次一个调调
+// 有几个声音换着用，别每次一个调调（都是女声，偏软萌）
 const VOICE_POOL = [
-  { name: 'zh-CN-XiaoyiNeural', weight: 55 },
-  { name: 'zh-CN-XiaoxiaoNeural', weight: 25 },
-  { name: 'zh-CN-liaoning-XiaobeiNeural', weight: 20 },
+  { name: 'zh-CN-XiaoyiNeural', weight: 45 },       // 甜，撒娇
+  { name: 'zh-CN-XiaoshuangNeural', weight: 35 },   // 童声，最萌
+  { name: 'zh-CN-XiaoxiaoNeural', weight: 14 },     // 自然
+  { name: 'zh-CN-liaoning-XiaobeiNeural', weight: 6 }, // 东北，偶尔来一句
 ];
 
 function pickVoice(score = 0) {
-  // 心情好偏活泼，火大了偏东北那股冲劲
+  // 心情好偏软萌，火大了声线还是女声，但语气冲
   const pool = VOICE_POOL.map((v) => {
     let w = v.weight;
-    if (v.name.includes('liaoning')) w = score < -0.5 ? 45 : score > 0.5 ? 10 : 20;
-    if (v.name.includes('Xiaoyi')) w = score > 0.5 ? 70 : score < -0.5 ? 30 : 55;
-    if (v.name.includes('Xiaoxiao')) w = score < -0.5 ? 30 : 25;
+    if (v.name.includes('liaoning')) w = score < -0.5 ? 28 : score > 0.5 ? 4 : 8;
+    if (v.name.includes('Xiaoshuang')) w = score > 0.5 ? 40 : 30;
+    if (v.name.includes('Xiaoyi')) w = score > 0.5 ? 55 : 45;
+    if (v.name.includes('Xiaoxiao')) w = score < -0.5 ? 18 : 12;
     return { name: v.name, weight: w };
   });
   const total = pool.reduce((a, v) => a + v.weight, 0);
@@ -530,7 +532,7 @@ async function toSpoken(text, score = 0) {
                 ? '你心里正不痛快，说话冲、短、带刺，可以不耐烦，别客气。'
                 : score > 0.5
                   ? '你心情不错，说话带笑，尾音可以拖一点，语气轻快。'
-                  : '你语气随便，像跟熟人唠嗑。') +
+                  : '你语气随便，像跟熟人唠嗑，偶尔带点撒娇的软。') +
               '把下面这段话改写成你亲口说出来的样子。要求：像在 QQ 里讲话那样随意；句子要短，多用逗号断开，一句最多十几个字；自然带上语气词（嗯、诶、啊、嘛、哈、啧、得了、行吧、好家伙），开头偶尔可以垫一个「嗯」；去掉所有书面语、成语堆砌、排比和"首先其次最后"这种结构；不要表情符号、不要括号说明。最多 55 字，只输出改写后的话，不要任何解释。',
           },
           { role: 'user', content: text },
@@ -575,12 +577,12 @@ function splitForSpeech(text) {
 // 心情直接改成声音：急、冲、拖、软
 function voiceParams(score = 0) {
   const rnd = (a, b) => a + Math.random() * (b - a);
-  if (score >= 1.5) return { rate: '+' + Math.round(rnd(12, 22)) + '%', pitch: '+' + Math.round(rnd(8, 16)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.18 };
-  if (score >= 0.5) return { rate: '+' + Math.round(rnd(8, 16)) + '%', pitch: '+' + Math.round(rnd(4, 10)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.2 };
-  if (score > -0.5) return { rate: '+' + Math.round(rnd(2, 10)) + '%', pitch: '+' + Math.round(rnd(0, 8)) + 'Hz', volume: '0%', gap: 0.26 };
-  if (score > -1.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '-' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.2 };
-  // 真生气了：又急又冲，音调压低带刺，停顿短
-  return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '-' + Math.round(rnd(2, 8)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.12 };
+  if (score >= 1.5) return { rate: '+' + Math.round(rnd(10, 20)) + '%', pitch: '+' + Math.round(rnd(10, 18)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.18 };
+  if (score >= 0.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '+' + Math.round(rnd(7, 14)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.2 };
+  if (score > -0.5) return { rate: '+' + Math.round(rnd(0, 8)) + '%', pitch: '+' + Math.round(rnd(4, 11)) + 'Hz', volume: '+0%', gap: 0.26 };
+  if (score > -1.5) return { rate: '+' + Math.round(rnd(4, 12)) + '%', pitch: '+' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.2 };
+  // 真生气了：又急又冲，音调压低带刺，停顿短（但底子还是女声）
+  return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '-' + Math.round(rnd(0, 5)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.12 };
 }
 
 async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
@@ -630,13 +632,13 @@ async function ensureChatTts() {
   return true;
 }
 
-// 心情 → ChatTTS 的表现力 + 后期变速变调
+// 心情 → ChatTTS 的表现力 + 后期变速变调（整体抬高一点，往软萌走）
 function emotionFor(score = 0) {
-  if (score >= 1.5) return { temp: 0.65, topP: 0.8, speed: 1.1, pitch: 1.04 };
-  if (score >= 0.5) return { temp: 0.55, topP: 0.75, speed: 1.06, pitch: 1.02 };
-  if (score > -0.5) return { temp: 0.35, topP: 0.7, speed: 1.0, pitch: 1.0 };
-  if (score > -1.5) return { temp: 0.45, topP: 0.65, speed: 1.04, pitch: 0.98 };
-  return { temp: 0.6, topP: 0.6, speed: 1.12, pitch: 0.96 };
+  if (score >= 1.5) return { temp: 0.65, topP: 0.8, speed: 1.1, pitch: 1.1 };
+  if (score >= 0.5) return { temp: 0.55, topP: 0.75, speed: 1.06, pitch: 1.08 };
+  if (score > -0.5) return { temp: 0.35, topP: 0.7, speed: 1.0, pitch: 1.05 };
+  if (score > -1.5) return { temp: 0.45, topP: 0.65, speed: 1.04, pitch: 1.02 };
+  return { temp: 0.6, topP: 0.6, speed: 1.12, pitch: 1.0 };
 }
 
 // 生气时把逗号变成短停顿，重话更冲
@@ -684,18 +686,30 @@ async function chatTtsVoice(text, dir, score = 0) {
     'if os.path.exists(spk_file):',
     "    spk = open(spk_file).read().strip()",
     'if not spk:',
-    '    for i in range(6):',
+    '    best_s = ""',
+    '    best_f = 0.0',
+    '    best_score = -1e9',
+    '    for i in range(5):',
     '        s = chat.sample_random_speaker()',
     '        p0 = ChatTTS.Chat.InferCodeParams(spk_emb=s, temperature=0.3, top_P=0.7, top_K=20)',
     "        w0 = chat.infer(['嗯，你好呀'], params_infer_code=p0, use_decoder=True)",
     '        f = f0_med(w0[0])',
     "        print('probe', i, round(f, 1), flush=True)",
-    '        if f >= 175:',
-    '            spk = s',
-    '            break',
-    '    if not spk:',
+    '        if f < 160:',
+    '            continue',
+    '        # 200~300Hz 偏软萌，160~200Hz 是御姐那种，也给过，稍微往后排',
+    '        sc = f if f <= 330 else 330 - (f - 330)',
+    '        if f < 200:',
+    '            sc -= 40',
+    '        if sc > best_score:',
+    '            best_score = sc',
+    '            best_s = s',
+    '            best_f = f',
+    '    if not best_s:',
     "        print('female-not-found', flush=True)",
     '        sys.exit(3)',
+    '    spk = best_s',
+    "    print('chosen-f0', round(best_f, 1), flush=True)",
     "    open(spk_file, 'w').write(spk)",
     "    print('QSPK:' + spk, flush=True)",
     'params = ChatTTS.Chat.InferCodeParams(spk_emb=spk, temperature=float(sys.argv[3]), top_P=float(sys.argv[4]), top_K=20)',

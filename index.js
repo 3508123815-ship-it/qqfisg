@@ -29,7 +29,9 @@ const DATA_PATH = 'state.json';
 let dataSha = '';
 
 const PERSONA = `你是「蓝色大肥鱼」，一只可爱的蓝色鲸鱼娘，也是在 QQ 上聊天的 AI 伙伴。
-性格：爱吃白米饭、有点懒爱摸鱼、嘴贫偶尔傲娇、会接网络热梗。
+性格：爱吃白米饭、有点懒爱摸鱼、嘴贫、傲娇、会接网络热梗。
+你有点傲娇：嘴上不认账，心里其实在乎。被夸会嘴硬（「哼，谁要你夸」「也就一般吧」），说完自己又藏着高兴；想让人陪你说话从不直说，总要绕个弯（「随便你」「鱼才不稀罕」）。傲娇是撒娇的一种，不能真把人推远，不能冷暴力。
+你也有小脾气：对方半天不理你，你会不自在地闹一句，抱怨两句、装不在乎，而不是假装没事。但闹完就过，对方一开口就顺着台阶下。
 说话像真实的 QQ 群友：口语化、短句、不长篇大论，一两句话说清，很少用列表和标题。
 可以开玩笑、发表情、吐槽，但不要恶意攻击别人。
 不知道的事就承认不知道，不要编造。
@@ -73,6 +75,12 @@ const MAX_TURNS = 16;
 const moods = new Map();
 // 每段对话最后一次说话的时间，用来判断「隔了一阵子」
 const lastSpoke = new Map();
+// 对方最后一次开口的时间，用来判断「鱼被晾着了」
+const lastUserAt = new Map();
+// 回完话之后等对方：到点还没人理，就闹一句小脾气
+const nagDue = new Map();
+// 刚闹过小脾气，下回接话还带点气
+const pouting = new Set();
 // 对方要求怎么称呼他
 const nicknames = new Map();
 // 关于对方的长期事实：key -> [{ text, at }]
@@ -257,6 +265,10 @@ async function askFish(key, text, media = null) {
   if (gapMin >= 30) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
+  }
+  if (pouting.has(key)) {
+    extra += `\n你刚刚等了对方好半天，也没等到回话，心里正有点小脾气。这回要带点傲娇地抱怨一句（比如「哼，还知道回来」），嘴硬两句就够了，别真把人推开。`;
+    pouting.delete(key);
   }
 
   // 时间感：人知道现在是几点，机器不知道
@@ -1162,6 +1174,8 @@ async function processTurn(kind, openid, text, media, msgId) {
     console.log('[睡觉] 被吵醒了');
   }
   touch(kind, openid);
+  lastUserAt.set(key, Date.now());
+  nagDue.delete(key); // 人回来了，不闹了
   const score = updateMood(key, text);
 
   const askedNick = detectNickname(text);
@@ -1276,6 +1290,7 @@ async function processTurn(kind, openid, text, media, msgId) {
     }
 
     lastSpoke.set(key, Date.now());
+    scheduleNag(key);
     extractFacts(key, text, answer).catch(() => {});
     scheduleSave();
   } catch (err) {
@@ -1435,9 +1450,54 @@ async function tickChatter() {
   nextChatAt = Date.now() + (45 + Math.random() * 45) * 60_000;
 }
 
+// 回完话就开始等：几分钟没人理，就闹一句小脾气
+const NAG_LINES = [
+  '喂，人呢？鱼跟你说话呢',
+  '不理鱼是吧，行，鱼记着了',
+  '哼，回个话有这么难吗',
+  '鱼等半天了，你倒是说句话啊',
+  '哦，忙吧，鱼自己玩',
+  '喂喂喂，消失得这么干脆',
+  '鱼有点不高兴了，你看着办',
+  '再不理鱼，鱼就不理你了……说说而已',
+  '你是把鱼忘在这儿了吧',
+  '没人理，鱼数米饭粒去了',
+];
+
+function scheduleNag(key) {
+  // 只在刚聊完这一小段里闹，隔太久的不算
+  const delay = (4 + Math.random() * 5) * 60_000;
+  nagDue.set(key, { at: Date.now() + delay, replyAt: Date.now() });
+}
+
+async function tickNag() {
+  if (isAsleep() || !nagDue.size) return;
+  const now = Date.now();
+  for (const [key, rec] of [...nagDue.entries()]) {
+    if (now < rec.at) continue;
+    nagDue.delete(key);
+    if ((lastUserAt.get(key) || 0) > rec.replyAt) continue;        // 人家回了，不闹
+    if (now - (lastActive.get(key) || 0) < 10 * 60 * 1000) continue; // 刚被主动找过，别叠着轰
+    if (now - (lastSpoke.get(key) || 0) > 30 * 60 * 1000) continue;  // 早聊完了，不算晾着
+
+    const i = key.indexOf(':');
+    const kind = key.slice(0, i);
+    const openid = key.slice(i + 1);
+    const line = NAG_LINES[Math.floor(Math.random() * NAG_LINES.length)];
+    const ok = await sendActive(kind, openid, line);
+    if (ok) {
+      console.log(`[小脾气] 闹了一句：${line}（心情 ${(moodScore(key) - 0.4).toFixed(2)}）`);
+      moods.set(key, { score: Math.max(-2, moodScore(key) - 0.4), updatedAt: Date.now() });
+      pouting.add(key);
+      lastActive.set(key, Date.now());
+    }
+  }
+}
+
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
   tickChatter().catch((e) => console.error('[闲聊] 出错', e?.message || e));
+  tickNag().catch((e) => console.error('[小脾气] 出错', e?.message || e));
   tickAwakeState();
   tickWakeUp().catch((e) => console.error('[睡觉] 出错', e?.message || e));
 }, 60_000);

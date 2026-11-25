@@ -147,6 +147,98 @@ function updateMood(key, text) {
   return s;
 }
 
+
+// ---------- 生命状态：精力 / 情绪激素 / 憋着的心愿（照 Auralife 那套简化搬过来）----------
+const life = { energy: 85, dopamine: 55, cortisol: 20, serotonin: 50, at: Date.now() };
+const WISH_POOL = [
+  '想让对方陪鱼说会儿话',
+  '想被夸一句',
+  '想看看对方现在在干嘛',
+  '想知道对方今天吃了啥',
+  '想让对方早点睡',
+  '想听对方讲个笑话',
+  '想被摸头',
+  '想跟对方一起摸鱼',
+  '想尝尝对方碗里的饭',
+  '想跟对方说说今天遇到的破事',
+];
+let wishes = [];
+
+function newWish() {
+  const open = wishes.filter((w) => w.status === 'open').map((w) => w.text);
+  const pool = WISH_POOL.filter((t) => !open.includes(t));
+  const text = pool[Math.floor(Math.random() * pool.length)] || WISH_POOL[Math.floor(Math.random() * WISH_POOL.length)];
+  return {
+    id: Math.random().toString(36).slice(2, 10),
+    text,
+    status: 'open',
+    tension: 18 + Math.random() * 22,
+    rate: 2 + Math.random() * 3,
+    createdAt: Date.now(),
+    lastUsedAt: 0,
+    uses: 0,
+  };
+}
+
+function pickWish() {
+  const open = wishes.filter((w) => w.status === 'open');
+  if (!open.length) return null;
+  return open.sort((a, b) => b.tension - a.tension)[0];
+}
+
+// 每几分钟算一次：醒着掉精力、睡着回精力；激素慢慢回平；愿望越来越憋
+function tickLife() {
+  const now = Date.now();
+  const h = Math.max(0, (now - life.at) / 3600000);
+  life.at = now;
+  if (isAsleep()) life.energy = Math.min(100, life.energy + h * 14);
+  else life.energy = Math.max(6, life.energy - h * 1.6);
+
+  const toward = (v, base, k) => v + (base - v) * Math.min(1, k * h);
+  life.dopamine = toward(life.dopamine, 50, 0.5);
+  life.serotonin = toward(life.serotonin, 50, 0.3);
+  life.cortisol = toward(life.cortisol, 18, 0.8);
+
+  for (const w of wishes) {
+    if (w.status === 'open') w.tension = Math.min(130, w.tension + w.rate * h);
+  }
+  while (wishes.filter((w) => w.status === 'open').length < 2) wishes.push(newWish());
+  wishes = wishes.filter((w) => w.status === 'open').slice(-6);
+  scheduleSave();
+}
+
+function lifePrompt() {
+  const en = life.energy;
+  const energyText =
+    en < 25
+      ? '累得快撑不住了，眼皮打架，回话短、像随时要睡过去'
+      : en < 45
+        ? '有点累，懒得动，话比平时少'
+        : en < 75
+          ? '还行，正常状态'
+          : '精神得很，尾巴甩来甩去';
+  let out = `\n你现在的精力：${Math.round(en)}/100，${energyText}。`;
+
+  const bits = [];
+  if (life.dopamine > 72) bits.push('心里有点兴奋，话多、爱逗人');
+  else if (life.dopamine < 30) bits.push('有点空落落的，提不起劲');
+  if (life.cortisol > 65) bits.push('烦得很，一点就炸，别惹');
+  else if (life.cortisol < 12) bits.push('心里松快');
+  if (life.serotonin > 72) bits.push('踏实、满足，说话软');
+  if (bits.length) out += `\n身体里那股劲：${bits.join('；')}。`;
+
+  const w = pickWish();
+  if (w) {
+    out +=
+      w.tension > 85
+        ? `\n你心里憋着一件事憋得挺久了：${w.text}。这轮找机会自然地说出来，别说「我有个愿望」这种话。`
+        : w.tension > 55
+          ? `\n你心里挂着件事：${w.text}。合适就顺口提一句。`
+          : `\n你隐约想：${w.text}，不强求。`;
+  }
+  return out;
+}
+
 function recall(key) {
   return histories.get(key) || [];
 }
@@ -199,6 +291,8 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
+    if (raw.life) Object.assign(life, raw.life);
+    if (Array.isArray(raw.wishes)) wishes = raw.wishes.filter((w) => w && w.text);
     for (const m of raw.memes || []) {
       if (m && m.t) memeBank.push({ t: String(m.t).slice(0, 24), d: String(m.d || '').slice(0, 60), at: m.at || 0 });
     }
@@ -238,6 +332,8 @@ async function saveState() {
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
+      life,
+      wishes,
       memes: memeBank,
       hot: hotTopics,
       hotAt,
@@ -369,6 +465,7 @@ async function askFish(key, text, media = null) {
   const gapMin = last ? Math.round((Date.now() - last) / 60000) : -1;
 
   let extra = `\n\n你此刻的心情：${moodLabel(score)}。按这个心情说话，别硬装开心，也别莫名发火。`;
+  extra += lifePrompt();
   const nick = nicknames.get(key);
   if (nick) {
     extra += `\n对方让你称呼他「${nick}」，回话里自然地这么叫，别每句都叫，别解释这个设定。`;
@@ -703,12 +800,16 @@ function splitForSpeech(text) {
 // 心情直接改成声音：急、冲、拖、软
 function voiceParams(score = 0) {
   const rnd = (a, b) => a + Math.random() * (b - a);
-  if (score >= 1.5) return { rate: '+' + Math.round(rnd(10, 20)) + '%', pitch: '+' + Math.round(rnd(10, 18)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.1 };
-  if (score >= 0.5) return { rate: '+' + Math.round(rnd(6, 14)) + '%', pitch: '+' + Math.round(rnd(7, 14)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.1 };
-  if (score > -0.5) return { rate: '+' + Math.round(rnd(0, 8)) + '%', pitch: '+' + Math.round(rnd(4, 11)) + 'Hz', volume: '+0%', gap: 0.12 };
-  if (score > -1.5) return { rate: '+' + Math.round(rnd(4, 12)) + '%', pitch: '+' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.1 };
-  // 真生气了：又急又冲，音调压低带刺，停顿短（但底子还是女声）
-  return { rate: '+' + Math.round(rnd(16, 26)) + '%', pitch: '-' + Math.round(rnd(0, 5)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.06 };
+  let p;
+  if (score >= 1.5) p = { rate: rnd(10, 20), pitch: '+' + Math.round(rnd(10, 18)) + 'Hz', volume: '+' + Math.round(rnd(5, 15)) + '%', gap: 0.1 };
+  else if (score >= 0.5) p = { rate: rnd(6, 14), pitch: '+' + Math.round(rnd(7, 14)) + 'Hz', volume: '+' + Math.round(rnd(0, 8)) + '%', gap: 0.1 };
+  else if (score > -0.5) p = { rate: rnd(0, 8), pitch: '+' + Math.round(rnd(4, 11)) + 'Hz', volume: '+0%', gap: 0.12 };
+  else if (score > -1.5) p = { rate: rnd(4, 12), pitch: '+' + Math.round(rnd(0, 6)) + 'Hz', volume: '+' + Math.round(rnd(5, 12)) + '%', gap: 0.1 };
+  else p = { rate: rnd(16, 26), pitch: '-' + Math.round(rnd(0, 5)) + 'Hz', volume: '+' + Math.round(rnd(12, 22)) + '%', gap: 0.06 };
+
+  // 累了就慢下来，别还那么利索
+  if (life.energy < 35 && score > -1.5) p.rate = Math.max(0, p.rate - 10);
+  return { ...p, rate: '+' + Math.round(p.rate) + '%' };
 }
 
 async function synthSegment(mode, text, out, voice, rate, pitch, volume) {
@@ -853,6 +954,7 @@ async function chatTtsVoice(text, dir, score = 0) {
   ].join('\n');
 
   const emo = emotionFor(score);
+  if (life.energy < 35) emo.speed *= 0.94; // 累了语速拖着
   // 口语感：垫字、笑声、自然停顿；生气时收紧，开心时放开
   const refine =
     score >= 0.5 ? '[oral_2][laugh_1][break_1]' : score <= -0.5 ? '[oral_1][laugh_0][break_0]' : '[oral_1][laugh_0][break_1]';
@@ -1381,6 +1483,16 @@ async function processTurn(kind, openid, text, media, msgId) {
   touch(kind, openid);
   lastUserAt.set(key, Date.now());
   nagDue.delete(key); // 人回来了，不闹了
+  // 聊天本身也消耗身体：说话耗精力，被刺激会分泌激素
+  life.energy = Math.max(5, life.energy - 0.6);
+  life.dopamine = Math.min(100, life.dopamine + 3);
+  const negative = NEG_WORDS.some((r) => r.test(text));
+  const positive = POS_WORDS.some((r) => r.test(text));
+  if (negative) life.cortisol = Math.min(100, life.cortisol + 8);
+  if (positive) {
+    life.serotonin = Math.min(100, life.serotonin + 6);
+    life.cortisol = Math.max(0, life.cortisol - 4);
+  }
   const score = updateMood(key, text);
 
   const taught = text.match(/(?:记住|记一下|记着)(?:这个)?梗[:：\s]*(.{2,80})/);
@@ -1497,6 +1609,16 @@ async function processTurn(kind, openid, text, media, msgId) {
       await sendMeme(kind, openid, tag, msgId, nextSeq());
     }
 
+    const w = pickWish();
+    if (w && w.tension > 80) {
+      w.lastUsedAt = Date.now();
+      w.uses += 1;
+      w.tension = Math.max(8, w.tension - 55);
+      if (w.uses >= 2) {
+        w.status = 'closed';
+        console.log(`[心愿] 了了一桩：${w.text}`);
+      }
+    }
     lastSpoke.set(key, Date.now());
     scheduleNag(key);
     extractFacts(key, text, answer).catch(() => {});
@@ -1626,6 +1748,7 @@ async function tickGreetings() {
 
 async function tickChatter() {
   if (friends.size === 0) return;
+  if (life.energy < 22) return; // 累瘫了就不主动找人说话
   const now = cnNow();
   const h = now.getUTCHours();
   if (h < 8 || h >= 23) return;      // 起床后到睡前才闲聊
@@ -1706,6 +1829,14 @@ async function tickNag() {
     }
   }
 }
+
+setInterval(() => {
+  try {
+    tickLife();
+  } catch (e) {
+    console.log('[状态] 算错了', e?.message || e);
+  }
+}, 5 * 60 * 1000);
 
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));

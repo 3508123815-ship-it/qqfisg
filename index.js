@@ -105,11 +105,37 @@ const lastUserAt = new Map();
 const nagDue = new Map();
 // 刚闹过小脾气，下回接话还带点气
 const pouting = new Set();
+// 对方说自己要睡了：这段时间一律不主动发消息
+const userAsleep = new Map();
 // 对方要求怎么称呼他
 const nicknames = new Map();
 // 关于对方的长期事实：key -> [{ text, at }]
 const facts = new Map();
 const MAX_FACTS = 12;
+
+const SLEEP_WORDS = /(?:我|俺)?(?:要|去|先|得|该|准备)?睡了|(?:我|俺|那)?(?:要|去|先|得|该)?睡觉(?:了|去|啦)|晚安|睡了啊|去睡了|困了睡了/;
+const WAKE_WORDS = /(?:我|俺)?(?:醒|起来|起)(?:了|啦)|早上好|早安|我醒了|起床了/;
+const SLEEP_EXCLUDE = /睡不着|不睡|还没睡|不想睡|睡醒|睡过|睡到|睡姿/;
+
+function detectUserSleep(text) {
+  if (!text || SLEEP_EXCLUDE.test(text)) return false;
+  return SLEEP_WORDS.test(text);
+}
+
+function detectUserWake(text) {
+  if (!text) return false;
+  return WAKE_WORDS.test(text);
+}
+
+function isUserAsleep(key) {
+  const rec = userAsleep.get(key);
+  if (!rec) return false;
+  if (Date.now() > rec.until) {
+    userAsleep.delete(key);
+    return false;
+  }
+  return true;
+}
 
 function detectNickname(text) {
   const m = text.match(/(?:以后|从现在起|往后|就)?(?:都)?(?:叫我|喊我|称呼我)\s*([\u4e00-\u9fa5A-Za-z0-9]{1,8})/);
@@ -291,6 +317,7 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
+    for (const [k, v] of Object.entries(raw.userAsleep || {})) userAsleep.set(k, v);
     if (raw.life) Object.assign(life, raw.life);
     if (Array.isArray(raw.wishes)) wishes = raw.wishes.filter((w) => w && w.text);
     for (const m of raw.memes || []) {
@@ -333,6 +360,7 @@ async function saveState() {
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
       life,
+      userAsleep: Object.fromEntries(userAsleep),
       wishes,
       memes: memeBank,
       hot: hotTopics,
@@ -1574,6 +1602,21 @@ async function processTurn(kind, openid, text, media, msgId) {
   touch(kind, openid);
   lastUserAt.set(key, Date.now());
   nagDue.delete(key); // 人回来了，不闹了
+  if (detectUserWake(text) && userAsleep.has(key)) {
+    userAsleep.delete(key);
+    scheduleSave();
+    console.log('[作息] 对方醒了，可以说话了');
+  } else if (detectUserSleep(text)) {
+    userAsleep.set(key, { at: Date.now(), until: Date.now() + 12 * 3600 * 1000 });
+    scheduleSave();
+    console.log('[作息] 对方说要睡了，今晚不主动打扰');
+  } else if (userAsleep.has(key)) {
+    // 人家又发消息了，那就是醒了
+    userAsleep.delete(key);
+    scheduleSave();
+    console.log('[作息] 对方又开口了，解除静默');
+  }
+
   // 聊天本身也消耗身体：说话耗精力，被刺激会分泌激素
   life.energy = Math.max(5, life.energy - 0.6);
   life.dopamine = Math.min(100, life.dopamine + 3);
@@ -1830,6 +1873,7 @@ async function tickGreetings() {
     for (const f of friends.values()) {
       if (n >= 3) break;
       if (Date.now() - f.lastSeen > 3 * 24 * 3600 * 1000) continue;
+      if (isUserAsleep(`${f.kind}:${f.openid}`)) continue; // 人家睡了，别吵
       const ok = await sendActive(f.kind, f.openid, line);
       if (ok) {
         n += 1;
@@ -1851,7 +1895,10 @@ async function tickChatter() {
   const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
   const cool = Date.now() - 45 * 60 * 1000;
   const pool = [...friends.values()].filter(
-    (f) => f.lastSeen > cutoff && (lastActive.get(`${f.kind}:${f.openid}`) || 0) < cool
+    (f) =>
+      f.lastSeen > cutoff &&
+      (lastActive.get(`${f.kind}:${f.openid}`) || 0) < cool &&
+      !isUserAsleep(`${f.kind}:${f.openid}`)
   );
   if (!pool.length) {
     nextChatAt = Date.now() + 30 * 60 * 1000;
@@ -1907,6 +1954,7 @@ async function tickNag() {
     if (now < rec.at) continue;
     nagDue.delete(key);
     if ((lastUserAt.get(key) || 0) > rec.replyAt) continue;        // 人家回了，不闹
+    if (isUserAsleep(key)) continue;                                // 人家睡了，不闹
     if (now - (lastActive.get(key) || 0) < 10 * 60 * 1000) continue; // 刚被主动找过，别叠着轰
     if (now - (lastSpoke.get(key) || 0) > 30 * 60 * 1000) continue;  // 早聊完了，不算晾着
 
@@ -1945,6 +1993,7 @@ async function tickWakeUp() {
   if (isAsleep() || !missed.size) return;
   for (const [key, rec] of [...missed.entries()]) {
     missed.delete(key);
+    if (isUserAsleep(key)) continue;
     const line =
       rec.count >= 3
         ? `醒了醒了，昨晚你发了 ${rec.count} 条，鱼睡得跟死了一样`

@@ -266,6 +266,10 @@ async function askFish(key, text, media = null) {
   const slot = hour < 5 ? '凌晨' : hour < 9 ? '早上' : hour < 12 ? '上午' : hour < 14 ? '中午' : hour < 18 ? '下午' : hour < 22 ? '晚上' : '深夜';
   extra += `\n现在是周${week}${slot}${hour}点。别总说「夜深了早点睡」这种套话，除非真该说。`;
 
+  if (justWoke()) {
+    extra += `\n你刚睡醒没多久，脑子还没转过来，说话有点懒、有点含糊，可能还带点起床气。别一上来就元气满满。`;
+  }
+
   // 记得的事
   const memo = (facts.get(key) || []).slice(-MAX_FACTS);
   if (memo.length) {
@@ -1328,6 +1332,23 @@ function isAsleep() {
   const m = cnMinutes();
   return m >= SLEEP_START || m < SLEEP_END;
 }
+
+// 刚睡醒的那段时间，说话还没上线
+let wakeAt = 0;
+let wasAsleep = isAsleep();
+
+function tickAwakeState() {
+  const nowAsleep = isAsleep();
+  if (wasAsleep && !nowAsleep) {
+    wakeAt = Date.now();
+    console.log('[睡觉] 醒了');
+  }
+  wasAsleep = nowAsleep;
+}
+
+function justWoke(ms = 30 * 60 * 1000) {
+  return wakeAt > 0 && Date.now() - wakeAt < ms;
+}
 let nextChatAt = Date.now() + (40 + Math.random() * 50) * 60_000;
 
 function cnNow() {
@@ -1405,6 +1426,7 @@ async function tickChatter() {
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
   tickChatter().catch((e) => console.error('[闲聊] 出错', e?.message || e));
+  tickAwakeState();
   tickWakeUp().catch((e) => console.error('[睡觉] 出错', e?.message || e));
 }, 60_000);
 

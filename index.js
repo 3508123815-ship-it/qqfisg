@@ -26,6 +26,10 @@ const INTENTS = 1 << 25; // GROUP_AND_C2C_EVENT：群 @ 与单聊
 const DATA_REPO = process.env.DATA_REPO || '';
 const GH_TOKEN = process.env.GH_TOKEN || '';
 const DATA_PATH = 'state.json';
+// 最近网上在聊什么（每轮开机拉一次，隔一阵再刷）
+let hotTopics = [];
+let hotAt = 0;
+let hotFrom = '';
 let dataSha = '';
 
 const PERSONA = `你是「蓝色大肥鱼」，一只可爱的蓝色鲸鱼娘，也是在 QQ 上聊天的 AI 伙伴。
@@ -177,6 +181,9 @@ async function loadState() {
     for (const [k, v] of Object.entries(raw.lastSpoke || {})) lastSpoke.set(k, v);
     for (const [k, v] of Object.entries(raw.nicknames || {})) nicknames.set(k, v);
     for (const [k, v] of Object.entries(raw.facts || {})) facts.set(k, v);
+    if (Array.isArray(raw.hot)) hotTopics = raw.hot;
+    if (raw.hotAt) hotAt = raw.hotAt;
+    if (raw.hotFrom) hotFrom = raw.hotFrom;
     if (raw.spkVer === 3) {
       if (raw.spkCute) chatSpkCute = raw.spkCute;
       if (raw.spkMature) chatSpkMature = raw.spkMature;
@@ -210,6 +217,9 @@ async function saveState() {
       lastSpoke: Object.fromEntries(lastSpoke),
       nicknames: Object.fromEntries(nicknames),
       facts: Object.fromEntries(facts),
+      hot: hotTopics,
+      hotAt,
+      hotFrom,
       spkVer: 3,
       spkCute: chatSpkCute || '',
       spkMature: chatSpkMature || '',
@@ -260,6 +270,76 @@ async function saveState() {
   }
 }
 
+// ---------- 追热梗：每次开机拉一遍热搜，聊天时才有当下感 ----------
+const HOT_SOURCES = [
+  {
+    name: '百度',
+    url: 'https://top.baidu.com/api/board?platform=wise&tab=realtime',
+    pick: (j) => (j?.data?.cards?.[0]?.content?.[0]?.content || []).map((x) => x.word),
+  },
+  {
+    name: '头条',
+    url: 'https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc',
+    pick: (j) => (j?.data || []).map((x) => x.Title),
+  },
+  {
+    name: '抖音',
+    url: 'https://www.iesdouyin.com/web/api/v2/hotsearch/billboard/word/',
+    pick: (j) => (j?.word_list || []).map((x) => x.word),
+  },
+];
+
+async function refreshHot() {
+  // 几家一起拉，抖音那口最像梗，排前面
+  const per = [];
+  for (const s of HOT_SOURCES) {
+    try {
+      const r = await fetch(s.url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15',
+          Referer: 'https://www.baidu.com/',
+        },
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!r.ok) {
+        console.log(`[热梗] ${s.name} 返回 ${r.status}`);
+        continue;
+      }
+      const j = await r.json();
+      const items = (s.pick(j) || [])
+        .filter((x) => typeof x === 'string' && x.trim())
+        .map((x) => x.trim().slice(0, 30))
+        .slice(0, 8);
+      if (items.length) per.push({ name: s.name, items });
+      console.log(`[热梗] ${s.name} ${items.length} 条`);
+    } catch (e) {
+      console.log(`[热梗] ${s.name} 没拉下来`, e?.message || e);
+    }
+  }
+  if (!per.length) {
+    console.log('[热梗] 这次一条都没拉到，先用旧的');
+    return false;
+  }
+  // 抖音优先（梗多），再百度、头条
+  per.sort((a, b) => (a.name === '抖音' ? -1 : b.name === '抖音' ? 1 : 0));
+  const merged = [];
+  for (const { items } of per) {
+    for (const it of items) {
+      if (!merged.includes(it) && merged.length < 12) merged.push(it);
+    }
+  }
+  if (merged.length < 3) {
+    console.log('[热梗] 太少，先不更新');
+    return false;
+  }
+  hotTopics = merged;
+  hotAt = Date.now();
+  hotFrom = per.map((x) => x.name).join('+');
+  scheduleSave();
+  console.log(`[热梗] 拿到 ${merged.length} 条（${hotFrom}）：${merged.slice(0, 3).join(' / ')}`);
+  return true;
+}
+
 // ---------- 叫模型 ----------
 async function askFish(key, text, media = null) {
   const score = moodScore(key);
@@ -274,6 +354,9 @@ async function askFish(key, text, media = null) {
   if (gapMin >= 30) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
+  }
+  if (hotTopics.length && Date.now() - hotAt < 8 * 3600 * 1000) {
+    extra += `\n最近网上在聊这些：${hotTopics.slice(0, 10).join('、')}。要是对方聊到对得上的，可以顺口接一句；对不上就别硬提，别背标题、别像报新闻。遇到你不认识的新梗，直接问「这啥梗」或者「鱼没跟上」，别装懂。`;
   }
   if (pouting.has(key)) {
     extra += `\n你刚刚等了对方好半天，也没等到回话，心里正有点小脾气。这回要带点傲娇地抱怨一句（比如「哼，还知道回来」），嘴硬两句就够了，别真把人推开。`;
@@ -1766,5 +1849,9 @@ if (!APPID || !SECRET) {
   setInterval(() => {
     saveState();
   }, 5 * 60 * 1000);
-  loadState().finally(connect);
+  loadState().finally(() => {
+    refreshHot();
+    connect();
+  });
+  setInterval(() => refreshHot(), 90 * 60 * 1000);
 }

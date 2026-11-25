@@ -1309,6 +1309,18 @@ const CHAT_LINES = [
   '鱼刚看到个事想不通，跟你说说',
   '你这会儿在干嘛，不许说在忙',
   '摸鱼时间到了，你呢',
+  '突然觉得白米饭真好吃',
+  '喂，活着没',
+  '在线吗？不在鱼就自己玩去了',
+  '刚打了个哈欠，传染给你',
+  '有件事想问你，又忘了是什么事',
+  '今天累不累啊',
+  '鱼有点无聊，你陪我说两句呗',
+  '诶，你觉得鱼可爱吗',
+  '刚刷到个笑话，笑完就忘了',
+  '你这人是不是又在忙',
+  '说点啥吧，随便说',
+  '鱼今天啥也没干，挺得意的',
 ];
 
 const firedSlots = new Set();
@@ -1349,7 +1361,7 @@ function tickAwakeState() {
 function justWoke(ms = 30 * 60 * 1000) {
   return wakeAt > 0 && Date.now() - wakeAt < ms;
 }
-let nextChatAt = Date.now() + (40 + Math.random() * 50) * 60_000;
+let nextChatAt = Date.now() + (20 + Math.random() * 25) * 60_000;
 
 function cnNow() {
   return new Date(Date.now() + 8 * 3600 * 1000);
@@ -1388,22 +1400,22 @@ async function tickChatter() {
   if (friends.size === 0) return;
   const now = cnNow();
   const h = now.getUTCHours();
-  if (h < 9 || h >= 23) return;      // 白天到睡前才闲聊
+  if (h < 8 || h >= 23) return;      // 起床后到睡前才闲聊
   if (Date.now() < nextChatAt) return;
 
   const cutoff = Date.now() - 3 * 24 * 3600 * 1000;
-  const cool = Date.now() - 2 * 3600 * 1000;
+  const cool = Date.now() - 45 * 60 * 1000;
   const pool = [...friends.values()].filter(
     (f) => f.lastSeen > cutoff && (lastActive.get(`${f.kind}:${f.openid}`) || 0) < cool
   );
   if (!pool.length) {
-    nextChatAt = Date.now() + 60 * 60 * 1000;
+    nextChatAt = Date.now() + 30 * 60 * 1000;
     return;
   }
 
   // 每次最多找两个人，别一起轰炸
   const picks = [];
-  while (picks.length < Math.min(2, pool.length)) {
+  while (picks.length < Math.min(3, pool.length)) {
     const f = pool[Math.floor(Math.random() * pool.length)];
     if (!picks.includes(f)) picks.push(f);
   }
@@ -1419,8 +1431,8 @@ async function tickChatter() {
   }
   console.log(`[闲聊] 发了 ${n} 条：${line}`);
 
-  // 下次隔 2~3 小时
-  nextChatAt = Date.now() + (120 + Math.random() * 60) * 60_000;
+  // 下次隔 45~90 分钟
+  nextChatAt = Date.now() + (45 + Math.random() * 45) * 60_000;
 }
 
 setInterval(() => {

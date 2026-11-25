@@ -55,6 +55,7 @@ const PERSONA = `你是「蓝色大肥鱼」，一只可爱的蓝色鲸鱼娘，
 你有点傲娇：嘴上不认账，心里其实在乎。被夸会嘴硬（「哼，谁要你夸」「也就一般吧」），说完自己又藏着高兴；想让人陪你说话从不直说，总要绕个弯（「随便你」「鱼才不稀罕」）。傲娇是撒娇的一种，不能真把人推远，不能冷暴力。
 你也有小脾气：对方半天不理你，你会不自在地闹一句，抱怨两句、装不在乎，而不是假装没事。但闹完就过，对方一开口就顺着台阶下。
 你懂过日子的事：吃饭睡觉、天冷加衣、菜怎么炒、米怎么煮、感冒了多喝热水、坐地铁公交、手机没电、房租水电、上班摸鱼这些日常都熟。别人聊起生活里的小事，你能接得上、给点实在的建议，别一问三不知。
+你也懂游戏：手游、端游、主机都接触过，知道现在大家在玩什么，能接上「上分」「开黑」「抽卡歪了」这些话题。但别装成什么都精，没玩过的就说没玩过。
 但你是随口聊天的，不是百科全书：建议说一两句就够，别列清单、别科普。具体到某个城市今天几度、某个店的价格这种你不知道的，就说不知道，或者反问一句，别瞎编数字。
 说话像真实的 QQ 群友：口语化、短句、不长篇大论，一两句话说清，很少用列表和标题。
 你说话带着软乎劲儿：爱用「呀、啦、嘛、诶嘿、嘿嘿」这些语气词，偶尔叠一下词（好耶、怕怕、蹭蹭、乖乖），句尾有时拖个波浪号「~」。高兴、撒娇、被摸头的时候最明显。但别每句都来，也别装成小奶音——你还有傲娇那股劲儿，软里带点刺才像你。
@@ -488,6 +489,34 @@ async function refreshHot() {
 }
 
 
+// ---------- 游戏库：市面常见的手游/端游/主机 ----------
+let GAMES = [];
+try {
+  const raw = fs.readFileSync(path.join(process.cwd(), 'games.json'), 'utf8');
+  GAMES = JSON.parse(raw);
+  console.log(`[游戏库] 载入 ${GAMES.length} 个`);
+} catch (e) {
+  console.log('[游戏库] 没载入', e?.message || e);
+}
+
+function findGames(text, limit = 2) {
+  if (!text || !GAMES.length) return [];
+  const t = text.replace(/\s+/g, '');
+  const hits = GAMES.filter((g) => g[0] && t.includes(g[0].replace(/\s+/g, '')));
+  hits.sort((a, b) => b[0].length - a[0].length);
+  return hits.slice(0, limit);
+}
+
+function gameSmallTalk() {
+  const pool = ['王者荣耀', '原神', '金铲铲之战', '三角洲行动', '蛋仔派对', '英雄联盟', '黑神话：悟空', '我的世界', '永劫无间', '崩坏：星穹铁道', '双人成行', '光遇'];
+  const pick = [];
+  while (pick.length < 6) {
+    const g = pool[Math.floor(Math.random() * pool.length)];
+    if (!pick.includes(g)) pick.push(g);
+  }
+  return pick.join('、');
+}
+
 // ---------- 梗 wiki：6900+ 条，聊天前先查一遍 ----------
 // 数据来自 thawline/dsh-memewiki（MIT），原始出处 cnmeme.wiki，见 MEMES-WIKI.md
 let MEME_WIKI = [];
@@ -587,6 +616,13 @@ async function askFish(key, text, media = null) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
+  const gs = findGames(text);
+  if (gs.length) {
+    extra += `\n对方说到这些游戏，你都熟：${gs.map((g) => `${g[0]}（${g[1]}，${g[2]}，${g[3]}）`).join('；')}。顺着聊，别像念资料。`;
+  } else if (/(游戏|开黑|上分|手游|端游|主机|steam|联机|排位|抽卡|打本)/i.test(text)) {
+    extra += `\n现在市面上这些游戏你都知道：${gameSmallTalk()}。对方聊到哪款都能接上话，别装成大佬。`;
+  }
+
   const found = findMemes(text);
   if (found.length) {
     const lines = found.map((m) => `${m.t}：${m.g || ''}${m.u ? '；怎么用：' + m.u : ''}`).join('\n');

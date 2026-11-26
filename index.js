@@ -654,6 +654,9 @@ async function askFish(key, text, media = null) {
     const gapText = gapMin >= 60 ? `${Math.round(gapMin / 60)} 个多小时` : `${gapMin} 分钟`;
     extra += `\n对方有 ${gapText}没找你了。`;
   }
+  if (key.startsWith('group:')) {
+    extra += `\n这是在 QQ 群里，不是私聊。说话更短更随便，能接群里的话茬；别撒娇过头、别用私聊那套亲密口气，也别把群当成只有你们两个人。有人 @ 你就答得干脆点。`;
+  }
   if (Date.now() - (angryAt.get(key) || 0) < 6 * 60 * 1000) {
     extra += `\n对方这会儿是真在气头上，说的都是气话：「滚」「别理我」「算了」「随便吧」这些不是让你真走，别当真、别顶嘴、别讲道理、也别问「你怎么了」这种空话。先软下来，认个错、撒个娇、或者委屈一点都行，哄两句。`;
   }
@@ -1817,7 +1820,8 @@ async function processTurn(kind, openid, text, media, msgId) {
 
     // 语音优先：念出来了就不重复打字
     let voiceOk = false;
-    if ((wantsVoice || voiceByModel) && answer && room()) {
+    const inGroup = kind === 'group';
+    if ((wantsVoice || (voiceByModel && !inGroup)) && answer && room()) {
       // 第一次要装 ChatTTS，先吱一声，别让人干等
       if (chatterState === '' && room()) {
         await sendReply(kind, openid, '等会儿，鱼先清个嗓子', msgId, nextSeq());
@@ -1970,6 +1974,7 @@ async function tickGreetings() {
     for (const f of friends.values()) {
       if (n >= 3) break;
       if (Date.now() - f.lastSeen > 3 * 24 * 3600 * 1000) continue;
+      if (f.kind !== 'c2c') continue; // 群不主动打扰，只在被 @ 时说话
       if (isUserAsleep(`${f.kind}:${f.openid}`)) continue; // 人家睡了，别吵
       const ok = await sendActive(f.kind, f.openid, line);
       if (ok) {
@@ -1993,6 +1998,7 @@ async function tickChatter() {
   const cool = Date.now() - 45 * 60 * 1000;
   const pool = [...friends.values()].filter(
     (f) =>
+      f.kind === 'c2c' &&
       f.lastSeen > cutoff &&
       (lastActive.get(`${f.kind}:${f.openid}`) || 0) < cool &&
       !isUserAsleep(`${f.kind}:${f.openid}`)
@@ -2051,6 +2057,7 @@ async function tickNag() {
     if (now < rec.at) continue;
     nagDue.delete(key);
     if ((lastUserAt.get(key) || 0) > rec.replyAt) continue;        // 人家回了，不闹
+    if (key.startsWith('group:')) continue;                          // 群里不闹小脾气
     if (isUserAsleep(key)) continue;                                // 人家睡了，不闹
     if (Date.now() - (angryAt.get(key) || 0) < 15 * 60 * 1000) continue; // 人家正生气，别凑上去闹
     if (now - (lastActive.get(key) || 0) < 10 * 60 * 1000) continue; // 刚被主动找过，别叠着轰
@@ -2178,7 +2185,7 @@ async function handlePayload(raw) {
         console.log('[网关] 已连接，机器人:', p.d?.user?.username);
       } else if (p.t === 'RESUMED') {
         console.log('[网关] 会话已恢复');
-      } else if (p.t === 'GROUP_AT_MESSAGE_CREATE') {
+      } else if (p.t === 'GROUP_AT_MESSAGE_CREATE' || p.t === 'GROUP_MESSAGE_CREATE') {
         onMessage('group', p.d);
       } else if (p.t === 'C2C_MESSAGE_CREATE') {
         onMessage('c2c', p.d);

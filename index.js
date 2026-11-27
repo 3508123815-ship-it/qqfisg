@@ -1637,7 +1637,7 @@ async function ttsDiagnose() {
 const pendingTurns = new Map();
 const MERGE_WINDOW_MS = 3000;
 
-function onMessage(kind, d) {
+function onMessage(kind, d, mentioned = true) {
   if (!d || !d.id) return;
   if (seen.has(d.id)) return;
   seen.add(d.id);
@@ -1650,6 +1650,17 @@ function onMessage(kind, d) {
   const openid = kind === 'group' ? d.group_openid : d.author?.user_openid;
   if (!openid) return;
 
+  // 群里没点名的消息：先只记着，攒几句再决定要不要插嘴
+  if (kind === 'group' && !mentioned) {
+    const gk = `group:${openid}`;
+    const buf = groupChat.get(gk) || [];
+    buf.push({ text: text.slice(0, 80), at: Date.now(), msgId: d.id });
+    while (buf.length > 12) buf.shift();
+    groupChat.set(gk, buf);
+    maybeChimeIn(gk, openid, d.id).catch((e) => console.log('[群] 插嘴出错', e?.message || e));
+    return;
+  }
+
   const key = `${kind}:${openid}`;
   const cur = pendingTurns.get(key) || { kind, openid, parts: [], media: null, lastId: d.id, timer: null };
   if (text) cur.parts.push(text);
@@ -1661,6 +1672,45 @@ function onMessage(kind, d) {
   }, MERGE_WINDOW_MS);
   pendingTurns.set(key, cur);
   console.log(`[收到] ${text.slice(0, 40) || '[媒体]'}（等他说完…）`);
+}
+
+// 群里没被点名的消息，偶尔主动插一句
+const groupChimeAt = new Map();
+
+async function maybeChimeIn(gk, openid, msgId) {
+  if (isAsleep()) return;
+  if (Date.now() - (groupChimeAt.get(gk) || 0) < 25 * 60 * 1000) return; // 半小时内不连续插嘴
+  if (Math.random() > 0.12) return; // 也不是每条都插
+
+  const buf = groupChat.get(gk) || [];
+  if (buf.length < 2) return;
+  groupChimeAt.set(gk, Date.now());
+
+  const lines = buf.slice(-8).map((x) => `- ${x.text}`).join('\n');
+  const extra = `\n这是在 QQ 群里，有人没点名，你想接一句。群里刚在聊：\n${lines}\n你就自然插一句，短、像群友；能接梗就接，别硬拽话题，别总结大家的发言，别每条都接。`;
+  const messages = [
+    { role: 'system', content: PERSONA + extra },
+    { role: 'user', content: '（群里的对话，你自己决定接不接、接哪句）' },
+  ];
+  const res = await fetch('https://api.deepseek.com/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${DEEPSEEK_KEY}` },
+    body: JSON.stringify({ model: MODEL, messages, temperature: 1.2, max_tokens: 300, thinking: { type: 'disabled' } }),
+    signal: AbortSignal.timeout(60000),
+  });
+  const j = await res.json();
+  let answer = j?.choices?.[0]?.message?.content?.trim();
+  if (!answer) return;
+  answer = answer.replace(/\[语音\]/g, '').replace(/\[表情[:：][^\]]*\]/g, '').trim();
+  if (!answer) return;
+  if (answer.length > 120) answer = answer.slice(0, 120) + '…';
+  answer = await polishAnswer(answer);
+  const ok = await sendReply('group', openid, answer, msgId, 1);
+  if (ok) {
+    remember(gk, 'assistant', answer);
+    lastActive.set(gk, Date.now());
+    console.log('[群] 主动插了一句:', answer.slice(0, 30));
+  }
 }
 
 async function flushTurn(key) {
@@ -2077,6 +2127,38 @@ async function tickNag() {
   }
 }
 
+// 群里没人搭理时，隔三差五自己冒个泡
+const GROUP_LINES = [
+  '群里这么安静，都去忙了？',
+  '冒个泡，鱼有点闲',
+  '有人在吗，出来聊两句',
+  '刚吃完饭，有点困',
+  '今天都没人说话，鱼自己玩去了',
+  '谁在，扣个1',
+  '突然安静得有点吓人',
+  '鱼来巡个场',
+];
+
+async function tickGroupChatter() {
+  if (isAsleep()) return;
+  const h = cnNow().getUTCHours();
+  if (h < 9 || h >= 22) return;
+  for (const f of friends.values()) {
+    if (f.kind !== 'group') continue;
+    if (Date.now() - f.lastSeen > 3 * 24 * 3600 * 1000) continue;
+    const key = `group:${f.openid}`;
+    if (Date.now() - (lastActive.get(key) || 0) < 3 * 3600 * 1000) continue; // 三小时内不重复
+    if (Math.random() > 0.45) continue;
+    if (isUserAsleep(key)) continue;
+    const line = GROUP_LINES[Math.floor(Math.random() * GROUP_LINES.length)];
+    const ok = await sendActive('group', f.openid, line);
+    if (ok) {
+      lastActive.set(key, Date.now());
+      console.log('[群] 主动冒了个泡:', line);
+    }
+  }
+}
+
 setInterval(() => {
   try {
     tickLife();
@@ -2084,6 +2166,10 @@ setInterval(() => {
     console.log('[状态] 算错了', e?.message || e);
   }
 }, 5 * 60 * 1000);
+
+setInterval(() => {
+  tickGroupChatter().catch((e) => console.error('[群] 出错', e?.message || e));
+}, 20 * 60 * 1000);
 
 setInterval(() => {
   tickGreetings().catch((e) => console.error('[主动] 出错', e?.message || e));
@@ -2185,8 +2271,10 @@ async function handlePayload(raw) {
         console.log('[网关] 已连接，机器人:', p.d?.user?.username);
       } else if (p.t === 'RESUMED') {
         console.log('[网关] 会话已恢复');
-      } else if (p.t === 'GROUP_AT_MESSAGE_CREATE' || p.t === 'GROUP_MESSAGE_CREATE') {
-        onMessage('group', p.d);
+      } else if (p.t === 'GROUP_AT_MESSAGE_CREATE') {
+        onMessage('group', p.d, true);
+      } else if (p.t === 'GROUP_MESSAGE_CREATE') {
+        onMessage('group', p.d, false);
       } else if (p.t === 'C2C_MESSAGE_CREATE') {
         onMessage('c2c', p.d);
       }

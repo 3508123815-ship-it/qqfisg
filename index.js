@@ -2275,6 +2275,14 @@ async function handlePayload(raw) {
         onMessage('group', p.d, true);
       } else if (p.t === 'GROUP_MESSAGE_CREATE') {
         onMessage('group', p.d, false);
+      } else if (p.t === 'GROUP_ADD_ROBOT') {
+        console.log('[群] 被拉进群了:', p.d?.group_openid);
+        if (p.d?.group_openid) {
+          sendActive('group', p.d.group_openid, '来了来了，鱼进群了，有事 @ 我').catch(() => {});
+          touch('group', p.d.group_openid);
+        }
+      } else if (p.t === 'GROUP_DEL_ROBOT') {
+        console.log('[群] 被移出群了:', p.d?.group_openid);
       } else if (p.t === 'C2C_MESSAGE_CREATE') {
         onMessage('c2c', p.d);
       }
